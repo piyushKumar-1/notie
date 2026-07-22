@@ -106,8 +106,29 @@ else
   warn "skipped — add it later, see README.md"
 fi
 
-# 6. Optional dependencies (voice notes & summaries)
-echo "${bold}6. optional dependencies${reset}"
+# 6. Claude Code skill (optional)
+echo "${bold}6. Claude Code skill (optional)${reset}"
+skill_src="$PWD/.claude/skills/notie-review"
+skill_dst="$HOME/.claude/skills/notie-review"
+if [[ ! -f "$skill_src/SKILL.md" ]]; then
+  warn "skill source missing at $skill_src — skipping"
+elif [[ "$skill_src" -ef "$skill_dst" ]]; then
+  ok "notie-review skill already lives at $skill_dst"
+elif ask "Install the 'notie-review' Claude Code skill globally (~/.claude/skills)?"; then
+  had_claude=false; [[ -d "$HOME/.claude" ]] && had_claude=true
+  mkdir -p "$skill_dst"
+  cp "$skill_src/SKILL.md" "$skill_dst/SKILL.md"
+  if $had_claude; then
+    ok "installed notie-review skill to $skill_dst"
+  else
+    ok "installed notie-review skill to $skill_dst (picked up once Claude Code is set up)"
+  fi
+else
+  warn "skipped — install later: cp -R .claude/skills/notie-review ~/.claude/skills/"
+fi
+
+# 7. Optional dependencies (voice notes & summaries)
+echo "${bold}7. optional dependencies${reset}"
 if command -v ffmpeg >/dev/null 2>&1; then
   ok "ffmpeg — voice recording available"
 else
