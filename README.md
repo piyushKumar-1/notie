@@ -89,6 +89,19 @@ autoload -Uz add-zsh-hook
 add-zsh-hook preexec _notie_log
 ```
 
+### Claude Code skill (optional)
+
+The repo ships a [`notie-review`](.claude/skills/notie-review/SKILL.md) skill for
+[Claude Code](https://claude.com/claude-code). It teaches Claude to build a
+weekly/monthly/quarterly review from your notie journals and tasks, and to
+reconcile your task list through native `notie` commands. `setup.sh` offers to
+install it globally to `~/.claude/skills/` so it works from any directory; to do
+it by hand:
+
+```sh
+cp -R .claude/skills/notie-review ~/.claude/skills/
+```
+
 ### Voice notes (optional, macOS)
 
 `notie radd` and friends record the mic and transcribe on-device:
