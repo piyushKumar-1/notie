@@ -114,6 +114,19 @@ func cmdRecord(target string) {
 	case "remember":
 		cmdDated("remember.md", "Remember", "remember", text)
 	case "task":
-		cmdTask([]string{text})
+		// priority is mandatory for tasks; keep asking until we get one
+		in := bufio.NewReader(os.Stdin)
+		for {
+			fmt.Print(cGrey + "priority [0 high · 1 normal · 2 low]: " + cReset)
+			p, err := in.ReadString('\n')
+			if err != nil {
+				fmt.Println("discarded")
+				return
+			}
+			if p = strings.TrimSpace(p); p == "0" || p == "1" || p == "2" {
+				cmdTask([]string{p, text})
+				return
+			}
+		}
 	}
 }

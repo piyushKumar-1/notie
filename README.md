@@ -25,11 +25,11 @@ notie add "text"        append to today's journal (~/.notie/<date>/journal.md)
 notie log "cmd"         append a shell command to today's audit trail
 notie addi "text"       append to important.md
 notie remember "text"   append to remember.md
-notie task "text"       add a task, then show tasks
+notie task <0|1|2> "text"  add a task (0 high · 1 normal · 2 low), then show tasks
 notie radd              record voice, transcribe, append to today's journal
                         (also: rjournal · raddi/rimportant · rremember · rtask)
-notie task              interactive task list
-notie task list         plain list of last 100 tasks
+notie task              interactive task list (done tasks hidden by default)
+notie task list         plain list of last 100 tasks, grouped by priority
 notie task done <id>    mark task done       (also: open, del)
 notie journal           interactive journal browser (dates sidebar + / search)
 notie shell             interactive shell-audit browser
@@ -39,9 +39,13 @@ notie cache             build datecache.md one-line summaries for past days
 notie show [what]       print a file (journal|shell|remember|important|task|datecache|YYYY-MM-DD)
 ```
 
-TUI keys: `j`/`k` move · `gg`/`G` top/bottom · `x` toggle (tasks) · `dd` delete
+TUI keys: `j`/`k` move · `gg`/`G` top/bottom · `x` toggle (tasks)
+· `0`/`1`/`2` set priority (tasks) · `.` show/hide done (tasks) · `dd` delete
 · `a` add · `/` search · `n`/`N` next/prev · `q` or `:q` quit
 · `:ff <pat>` find date files · `:fg <pat>` find mentions
+
+Task lists are grouped by priority (`!0` → `!1` → `!2`), oldest first within a
+group; tasks predating priorities sort last.
 
 ## Data layout
 
@@ -50,7 +54,7 @@ TUI keys: `j`/`k` move · `gg`/`G` top/bottom · `x` toggle (tasks) · `dd` dele
 ├── 2026-07-22/
 │   ├── journal.md      timestamped journal entries for the day
 │   └── shell.md        shell audit trail for the day
-├── task.md             tasks with ids, e.g. "- [ ] #12 buy milk (added 2026-07-22)"
+├── task.md             tasks with ids, e.g. "- [ ] #12 !1 buy milk (added 2026-07-22)"
 ├── important.md        dated important notes
 ├── remember.md         dated things to remember
 ├── datecache.md        one-line-per-day summaries built by `notie cache`
