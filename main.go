@@ -81,11 +81,11 @@ func usage() {
                           (~/.notie/<date>/shell.md — wired to a zsh preexec hook)
   notie addi "text"       append to important.md
   notie remember "text"   append to remember.md
-  notie task "text"       add a task to task.md, then show tasks
+  notie task <0|1|2> "text"  add a task (0 high · 1 normal · 2 low), then show tasks
   notie radd              record voice, transcribe, append to today's journal
                           (also: rjournal · raddi/rimportant · rremember · rtask)
-  notie task              interactive task list (j/k move, x toggle, dd delete, a add, q quit)
-  notie task list         plain list of last 100 tasks
+  notie task              interactive task list (done tasks hidden — . shows them)
+  notie task list         plain list of last 100 tasks, grouped by priority
   notie task done <id>    mark task done
   notie task open <id>    reopen a task
   notie task del <id>     delete a task
@@ -97,9 +97,9 @@ func usage() {
   notie show [what]       print a file (journal|shell|remember|important|task|datecache|YYYY-MM-DD)
   notie show shell [date] print a day's shell audit trail (default today)
 
-  TUI keys: j/k move · gg/G top/bottom · x toggle (tasks) · dd delete
-            a add · / search · n/N next/prev · q quit
-            :q quit · :ff <pat> find date files · :fg <pat> find mentions
+  TUI keys: j/k move · gg/G top/bottom · x toggle (tasks) · 0/1/2 priority
+            . show/hide done · dd delete · a add · / search · n/N next/prev
+            q/:q quit · :ff <pat> find date files · :fg <pat> find mentions
 `)
 }
 
@@ -153,6 +153,16 @@ func taskPath() string {
 }
 
 var taskRe = regexp.MustCompile(`^- \[[ x]\] #(\d+) `)
+var taskPriRe = regexp.MustCompile(`^- \[[ x]\] #\d+ !([0-2]) `)
+
+// taskPri returns a task's priority (0 high · 1 normal · 2 low). Lines
+// without a marker (pre-priority tasks) sort after every prioritized group.
+func taskPri(l string) int {
+	if m := taskPriRe.FindStringSubmatch(l); m != nil {
+		return int(m[1][0] - '0')
+	}
+	return 3
+}
 
 func taskLines() []string {
 	var out []string
@@ -173,6 +183,7 @@ func printTasks() {
 	if len(tasks) > 100 {
 		tasks = tasks[len(tasks)-100:]
 	}
+	sort.SliceStable(tasks, func(i, j int) bool { return taskPri(tasks[i]) < taskPri(tasks[j]) })
 	for _, t := range tasks {
 		fmt.Println(t)
 	}
@@ -251,22 +262,25 @@ func cmdTask(args []string) {
 		}
 		return
 	}
-	if args[0] == "list" {
-		printTasks()
-		return
-	}
 	switch args[0] {
+	case "list":
+		printTasks()
 	case "done", "open", "del":
 		if len(args) < 2 {
 			fatal("usage: notie task %s <id>", args[0])
 		}
 		taskEdit(args[1], args[0])
-	default:
-		desc := strings.Join(args, " ")
+	case "0", "1", "2":
+		desc := strings.TrimSpace(strings.Join(args[1:], " "))
+		if desc == "" {
+			fatal("missing text — notie task %s \"text\"", args[0])
+		}
 		id := nextID()
-		appendLine(taskPath(), "Tasks", fmt.Sprintf("- [ ] #%d %s (added %s)", id, desc, today()))
+		appendLine(taskPath(), "Tasks", fmt.Sprintf("- [ ] #%d !%s %s (added %s)", id, args[0], desc, today()))
 		fmt.Printf("added task #%d\n---\n", id)
 		printTasks()
+	default:
+		fatal("priority required — notie task <0|1|2> \"text\" (0 high · 1 normal · 2 low)")
 	}
 }
 

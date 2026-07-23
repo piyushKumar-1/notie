@@ -6,37 +6,59 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 )
 
 var taskFullRe = regexp.MustCompile(
-	`^- \[([ x])\] #(\d+) (.*?)(?: \(added (\d{4}-\d{2}-\d{2})\))?(?: \(done (\d{4}-\d{2}-\d{2})\))?$`)
+	`^- \[([ x])\] #(\d+)(?: !([0-2]))? (.*?)(?: \(added (\d{4}-\d{2}-\d{2})\))?(?: \(done (\d{4}-\d{2}-\d{2})\))?$`)
 
 type taskTUI struct {
-	lines   []string // full file content
-	tasks   []int    // indices into lines that are task lines
-	cursor  int
-	offset  int
-	pending byte    // 'd' or 'g' chord state
-	input   *string // non-nil while typing (add or search)
-	inputCh byte    // 'a' or '/'
-	search  string
-	status  string
+	lines    []string // full file content
+	tasks    []int    // indices into lines that are task lines
+	showDone bool     // '.' toggles; done tasks hidden by default
+	cursor   int
+	offset   int
+	pending  byte    // 'd' or 'g' chord state
+	input    *string // non-nil while typing (add or search)
+	inputCh  byte    // 'a' or '/'
+	search   string
+	status   string
 }
 
+// reload rebuilds the visible task list: grouped by priority (0·1·2, unmarked
+// legacy tasks last), oldest first within a group, done tasks filtered out
+// unless showDone.
 func (t *taskTUI) reload() {
 	t.lines = readLines(taskPath())
 	t.tasks = t.tasks[:0]
 	for i, l := range t.lines {
-		if taskRe.MatchString(l) {
-			t.tasks = append(t.tasks, i)
+		if !taskRe.MatchString(l) {
+			continue
 		}
+		if !t.showDone && strings.HasPrefix(l, "- [x]") {
+			continue
+		}
+		t.tasks = append(t.tasks, i)
 	}
+	sort.SliceStable(t.tasks, func(i, j int) bool {
+		return taskPri(t.lines[t.tasks[i]]) < taskPri(t.lines[t.tasks[j]])
+	})
 	if t.cursor >= len(t.tasks) {
 		t.cursor = len(t.tasks) - 1
 	}
 	if t.cursor < 0 {
 		t.cursor = 0
+	}
+}
+
+// cursorTo moves the cursor to task #id's row, if visible.
+func (t *taskTUI) cursorTo(id string) {
+	for vi, li := range t.tasks {
+		if m := taskRe.FindStringSubmatch(t.lines[li]); m != nil && m[1] == id {
+			t.cursor = vi
+			return
+		}
 	}
 }
 
@@ -57,21 +79,33 @@ func (t *taskTUI) row(l string, selected bool, cols int) (string, int) {
 		icon, descStyle = cGreen+iTaskDone+cReset, cGrey+cStrike
 	}
 	meta := ""
-	if m[4] != "" {
-		meta = " · " + m[4]
+	if m[5] != "" {
+		meta = " · " + m[5]
 	}
-	if done && m[5] != "" {
-		meta += " " + iTaskDone + " " + m[5]
+	if done && m[6] != "" {
+		meta += " " + iTaskDone + " " + m[6]
+	}
+	pri, priW := "", 0
+	if m[3] != "" {
+		pc := cGrey
+		switch {
+		case done:
+		case m[3] == "0":
+			pc = cRed
+		case m[3] == "1":
+			pc = cYellow
+		}
+		pri, priW = pc+"!"+m[3]+cReset+" ", 3
 	}
 	marker := "  "
 	if selected {
 		marker = cAccent + cBold + iCursor + cReset + " "
 	}
-	// plain layout: "❯ ○ #12 desc · date"
-	fixed := 2 + 2 + runeLen("#"+m[2]) + 1 + runeLen(meta)
-	desc := truncRunes(m[3], max(4, cols-fixed))
+	// plain layout: "❯ ○ #12 !0 desc · date"
+	fixed := 2 + 2 + runeLen("#"+m[2]) + 1 + priW + runeLen(meta)
+	desc := truncRunes(m[4], max(4, cols-fixed))
 	width := fixed + runeLen(desc)
-	styled := marker + icon + " " + cAccent + "#" + m[2] + cReset + " " +
+	styled := marker + icon + " " + cAccent + "#" + m[2] + cReset + " " + pri +
 		descStyle + highlight(desc, t.search, descStyle) + cReset +
 		cGrey + meta + cReset
 	return styled, width
@@ -82,14 +116,22 @@ func (t *taskTUI) render() {
 	b.WriteString("\x1b[H\x1b[2J")
 	rows, cols := termSize()
 
-	open := 0
-	for _, i := range t.tasks {
-		if strings.HasPrefix(t.lines[i], "- [ ]") {
+	open, done := 0, 0
+	for _, l := range t.lines {
+		if !taskRe.MatchString(l) {
+			continue
+		}
+		if strings.HasPrefix(l, "- [x]") {
+			done++
+		} else {
 			open++
 		}
 	}
-	b.WriteString(titleBar(cols, iTaskDone+" notie · tasks",
-		fmt.Sprintf("%d open · %d done", open, len(t.tasks)-open)) + "\r\n")
+	right := fmt.Sprintf("%d open · %d done", open, done)
+	if !t.showDone && done > 0 {
+		right += " (hidden)"
+	}
+	b.WriteString(titleBar(cols, iTaskDone+" notie · tasks", right) + "\r\n")
 
 	avail := max(1, rows-2)
 	if t.cursor < t.offset {
@@ -99,7 +141,11 @@ func (t *taskTUI) render() {
 		t.offset = t.cursor - avail + 1
 	}
 	if len(t.tasks) == 0 {
-		b.WriteString("\r\n  " + cGrey + "no tasks — press " + cReset + cYellow + "a" + cReset + cGrey + " to add one" + cReset + "\r\n")
+		if !t.showDone && done > 0 {
+			b.WriteString("\r\n  " + cGrey + "all tasks done — press " + cReset + cGreen + "." + cReset + cGrey + " to show them" + cReset + "\r\n")
+		} else {
+			b.WriteString("\r\n  " + cGrey + "no tasks — press " + cReset + cYellow + "a" + cReset + cGrey + " to add one" + cReset + "\r\n")
+		}
 	}
 	for vi := t.offset; vi < len(t.tasks) && vi < t.offset+avail; vi++ {
 		styled, w := t.row(t.lines[t.tasks[vi]], vi == t.cursor, cols)
@@ -114,6 +160,9 @@ func (t *taskTUI) render() {
 	switch {
 	case t.input != nil && t.inputCh == 'a':
 		b.WriteString(cYellow + " + " + cReset + *t.input + cCursor + " " + cReset)
+		if *t.input == "" {
+			b.WriteString(cGrey + " <0|1|2> text — priority first" + cReset)
+		}
 	case t.input != nil && t.inputCh == '/':
 		b.WriteString(cAccent + " /" + cReset + *t.input + cCursor + " " + cReset)
 	case t.input != nil && t.inputCh == ':':
@@ -123,9 +172,9 @@ func (t *taskTUI) render() {
 	case t.status != "":
 		b.WriteString(" " + t.status)
 	case t.search != "":
-		b.WriteString(cAccent+" /"+t.search+cReset+cGrey+"  n/N next/prev · esc clear"+cReset)
+		b.WriteString(cAccent + " /" + t.search + cReset + cGrey + "  n/N next/prev · esc clear" + cReset)
 	default:
-		b.WriteString(cGrey + " j/k move · x toggle · dd delete · a add · / search · :fg grep · q/:q quit" + cReset)
+		b.WriteString(cGrey + " j/k move · x toggle · 0-2 pri · . done · dd del · a add · / search · q quit" + cReset)
 	}
 	os.Stdout.WriteString(b.String())
 }
@@ -159,16 +208,47 @@ func (t *taskTUI) delete() {
 	t.status = cRed + "deleted" + cReset
 }
 
-func (t *taskTUI) addTask(desc string) {
-	desc = strings.TrimSpace(desc)
-	if desc == "" {
+// addTask parses "<0|1|2> description" — priority is mandatory.
+func (t *taskTUI) addTask(in string) {
+	in = strings.TrimSpace(in)
+	if in == "" {
+		return
+	}
+	pri, desc := "", ""
+	if len(in) > 1 && in[0] >= '0' && in[0] <= '2' && in[1] == ' ' {
+		pri, desc = in[:1], strings.TrimSpace(in[1:])
+	}
+	if pri == "" || desc == "" {
+		t.status = cRed + "priority required — type: <0|1|2> text" + cReset
 		return
 	}
 	id := nextID()
-	appendLine(taskPath(), "Tasks", fmt.Sprintf("- [ ] #%d %s (added %s)", id, desc, today()))
+	appendLine(taskPath(), "Tasks", fmt.Sprintf("- [ ] #%d !%s %s (added %s)", id, pri, desc, today()))
 	t.reload()
-	t.cursor = len(t.tasks) - 1
-	t.status = cGreen + fmt.Sprintf("added #%d", id) + cReset
+	t.cursorTo(fmt.Sprintf("%d", id))
+	t.status = cGreen + fmt.Sprintf("added #%d !%s", id, pri) + cReset
+}
+
+// setPri rewrites the selected task's priority marker and follows the task
+// to its new group position.
+func (t *taskTUI) setPri(p byte) {
+	if len(t.tasks) == 0 {
+		return
+	}
+	i := t.tasks[t.cursor]
+	head := taskRe.FindString(t.lines[i]) // "- [ ] #12 "
+	if head == "" {
+		return
+	}
+	rest := t.lines[i][len(head):]
+	if len(rest) > 2 && rest[0] == '!' && rest[1] >= '0' && rest[1] <= '2' && rest[2] == ' ' {
+		rest = rest[3:]
+	}
+	t.lines[i] = head + "!" + string(p) + " " + rest
+	id := taskRe.FindStringSubmatch(t.lines[i])[1]
+	t.save()
+	t.cursorTo(id)
+	t.status = cGrey + "#" + id + " → !" + string(p) + cReset
 }
 
 // findNext moves the cursor to the next/prev task matching the search.
@@ -281,6 +361,16 @@ func runTaskTUI() {
 			}
 		case 'x', ' ':
 			t.toggle()
+		case '0', '1', '2':
+			t.setPri(c)
+		case '.':
+			t.showDone = !t.showDone
+			t.reload()
+			if t.showDone {
+				t.status = cGrey + "showing done" + cReset
+			} else {
+				t.status = cGrey + "hiding done" + cReset
+			}
 		case 'd':
 			t.pending = 'd'
 		case 'a', 'o':
