@@ -93,7 +93,7 @@ func usage() {
   notie shell             interactive shell-audit browser (same day-level UI)
   notie important         interactive important-notes browser (day-level UI)
   notie remember          interactive remember-notes list
-  notie cache             build datecache.md entries for past journal days
+  notie cache             build datecache.md entries for past days (journal + tasks done)
   notie show [what]       print a file (journal|shell|remember|important|task|datecache|YYYY-MM-DD)
   notie show shell [date] print a day's shell audit trail (default today)
 
@@ -299,35 +299,66 @@ func journalEntries(path string) []string {
 	return out
 }
 
-// summarize produces the one-liner for a day. Prefers Claude Code (headless,
-// haiku); falls back to joining the raw entries if claude is unavailable,
-// errors out, or takes longer than 2 minutes.
-func summarize(journalPath string) string {
-	if entries := journalEntries(journalPath); len(entries) == 0 {
+// doneTasksByDate maps a completion date to the descriptions of the tasks
+// closed that day. Completed tasks with no (done …) stamp have no known date
+// and are skipped.
+func doneTasksByDate() map[string][]string {
+	out := map[string][]string{}
+	for _, l := range readLines(taskPath()) {
+		m := taskFullRe.FindStringSubmatch(l)
+		if m == nil || m[1] != "x" || m[6] == "" {
+			continue
+		}
+		out[m[6]] = append(out[m[6]], m[4])
+	}
+	return out
+}
+
+// summarize produces the one-liner for a day from its journal and the tasks
+// closed that day. Prefers Claude Code (headless, haiku); falls back to joining
+// the raw entries if claude is unavailable, errors out, or takes >2 minutes.
+func summarize(journalPath string, done []string) string {
+	entries := journalEntries(journalPath)
+	if len(entries) == 0 && len(done) == 0 {
 		return ""
 	}
 	if bin, err := exec.LookPath("claude"); err == nil {
+		var b strings.Builder
+		if raw, err := os.ReadFile(journalPath); err == nil {
+			b.Write(raw)
+		}
+		if len(done) > 0 {
+			b.WriteString("\n## Tasks completed\n")
+			for _, t := range done {
+				b.WriteString("- " + t + "\n")
+			}
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
 		cmd := exec.CommandContext(ctx, bin, "-p", "--model", "haiku",
-			"Below is one day's work journal. Reply with EXACTLY one line (no preamble, no markdown) summarizing what was done that day, compressing related entries together.")
-		if f, err := os.Open(journalPath); err == nil {
-			defer f.Close()
-			cmd.Stdin = f
-			if out, err := cmd.Output(); err == nil {
-				s := strings.Join(strings.Fields(string(out)), " ")
-				if s != "" {
-					return s
-				}
+			"Below is one day's work journal, followed by the tasks closed that day (either section may be absent). Reply with EXACTLY one line (no preamble, no markdown) summarizing what was done that day, compressing related entries together and folding the completed tasks in without repeating what the journal already covers.")
+		cmd.Stdin = strings.NewReader(b.String())
+		if out, err := cmd.Output(); err == nil {
+			s := strings.Join(strings.Fields(string(out)), " ")
+			if s != "" {
+				return s
 			}
 		}
 	}
-	return strings.Join(journalEntries(journalPath), "; ")
+	s := strings.Join(entries, "; ")
+	if len(done) > 0 {
+		if s != "" {
+			s += "; "
+		}
+		s += "Completed: " + strings.Join(done, "; ")
+	}
+	return s
 }
 
-// cmdCache summarizes each past day's journal into one line in datecache.md.
-// Idempotent: skips dates already cached. Catch-up safe: processes every past
-// date, so missed runs (laptop asleep) are filled in on the next run.
+// cmdCache summarizes each past day — its journal plus the tasks closed that
+// day — into one line in datecache.md. Idempotent: skips dates already cached.
+// Catch-up safe: processes every past date, so missed runs (laptop asleep) are
+// filled in on the next run.
 func cmdCache() {
 	dir := notieDir()
 	cachePath := filepath.Join(dir, "datecache.md")
@@ -344,18 +375,29 @@ func cmdCache() {
 			header = append(header, l)
 		}
 	}
+	// A day is worth summarizing if it has a journal directory or if any task
+	// was closed on it — a day spent only ticking tasks off still counts.
+	done := doneTasksByDate()
+	candidates := map[string]bool{}
 	dirents, _ := os.ReadDir(dir)
-	added := 0
 	for _, de := range dirents {
-		d := de.Name()
-		if !de.IsDir() || !dateRe.MatchString(d) || d >= today() || cached[d] {
-			continue
+		if de.IsDir() && dateRe.MatchString(de.Name()) {
+			candidates[de.Name()] = true
 		}
-		journal := filepath.Join(dir, d, "journal.md")
-		if _, err := os.Stat(journal); err != nil {
-			continue
+	}
+	for d := range done {
+		candidates[d] = true
+	}
+	var dates []string
+	for d := range candidates {
+		if d < today() && !cached[d] {
+			dates = append(dates, d)
 		}
-		if s := summarize(journal); s != "" {
+	}
+	sort.Strings(dates) // chronological, and deterministic across runs
+	added := 0
+	for _, d := range dates {
+		if s := summarize(filepath.Join(dir, d, "journal.md"), done[d]); s != "" {
 			entries = append(entries, fmt.Sprintf("- %s: %s", d, s))
 			added++
 		}

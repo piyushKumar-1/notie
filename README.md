@@ -120,8 +120,9 @@ cp -R .claude/skills/notie-review ~/.claude/skills/
 
 ### Daily summaries (optional)
 
-`notie cache` writes a one-line summary per past journal day into
-`datecache.md`. If the [`claude`](https://claude.com/claude-code) CLI is
-installed it's used for nicer summaries; otherwise entries are joined
-verbatim. Idempotent and catch-up safe — run it whenever, e.g. from a daily
-cron/launchd job.
+`notie cache` writes a one-line summary per past day into `datecache.md`,
+covering both that day's journal and the tasks closed on it — so a day spent
+only ticking tasks off still gets a line. If the
+[`claude`](https://claude.com/claude-code) CLI is installed it's used for nicer
+summaries; otherwise entries are joined verbatim. Idempotent and catch-up
+safe — run it whenever, e.g. from a daily cron/launchd job.
