@@ -31,7 +31,7 @@ Notes directory: `${NOTIE_DIR:-$HOME/.notie}`. Always honor `NOTIE_DIR`.
 | What | Path | Line format |
 |------|------|-------------|
 | Journal (per day) | `<dir>/<YYYY-MM-DD>/journal.md` | `- HH:MM — <text>` |
-| Tasks | `<dir>/task.md` | open: `- [ ] #<id> <desc> (added YYYY-MM-DD)` · done: `- [x] #<id> <desc> (added …) (done YYYY-MM-DD)` |
+| Tasks | `<dir>/task.md` | open: `- [ ] #<id> !<0\|1\|2> <desc> (added YYYY-MM-DD)` · done: `- [x] #<id> !<pri> <desc> (added …) (done YYYY-MM-DD)` |
 | Important | `<dir>/important.md` | `- YYYY-MM-DD HH:MM — <text>` |
 | Remember | `<dir>/remember.md` | `- YYYY-MM-DD HH:MM — <text>` |
 | Date cache | `<dir>/datecache.md` | `- YYYY-MM-DD: <one-line summary>` |
@@ -39,7 +39,9 @@ Notes directory: `${NOTIE_DIR:-$HOME/.notie}`. Always honor `NOTIE_DIR`.
 
 Task parsing: a task line matches `^- \[[ x]\] #(\d+) `; `[x]` = done; the
 optional ` (done YYYY-MM-DD)` suffix carries the completion date. Legacy done
-tasks may lack that suffix — treat them as done with an unknown date.
+tasks may lack that suffix — treat them as done with an unknown date. The
+`!<pri>` marker (0 high · 1 normal · 2 low) is also absent on pre-priority
+tasks; those sort after every prioritized group.
 
 The em dash in journal/note lines is `—` (U+2014), not a hyphen.
 
@@ -158,10 +160,16 @@ edits desync them.
 
 | Intent | Command |
 |--------|---------|
-| Mark done | `notie task done <id>` |
+| Mark done | `notie task done <id>` (stamps today) |
 | Reopen | `notie task open <id>` |
 | Delete | `notie task del <id>` |
-| Add | `notie task "<text>"` |
+| Add | `notie task <0\|1\|2> "<text>"` (priority is mandatory) |
+| Record work already finished | `notie did <YYYY-MM-DD> "<text>"` |
+| Write up a missed journal day | `notie add <YYYY-MM-DD> [HH:MM] "<text>"` |
+
+The last two are the ones a review usually needs: when the journal shows work
+that was never tracked as a task, `notie did` records it as completed on the day
+it happened, so future reviews and `notie cache` see it on the right date.
 
 Honor `NOTIE_DIR` on every call (e.g. `NOTIE_DIR="$DIR" notie task done 12`) so
 edits land in the same store you reviewed.
@@ -171,6 +179,9 @@ Before running anything:
   what will happen.
 - Note that `done` ↔ `open` is fully reversible, but **`del` permanently
   removes** the task — call that out for any deletion.
+- A retroactive write to a day that already has a `datecache.md` summary leaves
+  that one-liner stale; the command says so. Offer `notie cache <date>` to
+  rebuild it, under the same "don't run cache implicitly" rule below.
 
 After applying, run `notie task list` (with the right `NOTIE_DIR`) and re-show
 the updated **Completed / Still open** grouping so the user sees the result.

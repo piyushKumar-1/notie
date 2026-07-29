@@ -18,6 +18,7 @@ import (
 )
 
 var dateRe = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
+var timeRe = regexp.MustCompile(`^([01]\d|2[0-3]):[0-5]\d$`)
 var dcLineRe = regexp.MustCompile(`^- (\d{4}-\d{2}-\d{2}): (.*)$`)
 
 func notieDir() string {
@@ -38,6 +39,20 @@ func fatal(format string, a ...any) {
 
 func today() string { return time.Now().Format("2006-01-02") }
 func clock() string { return time.Now().Format("15:04") }
+
+func journalPath(d string) string { return filepath.Join(notieDir(), d, "journal.md") }
+func datecachePath() string       { return filepath.Join(notieDir(), "datecache.md") }
+
+// cachedDate reports whether datecache.md already summarizes d — a retroactive
+// write to such a day leaves its one-liner stale until `notie cache <d>`.
+func cachedDate(d string) bool {
+	for _, l := range readLines(datecachePath()) {
+		if m := dcLineRe.FindStringSubmatch(l); m != nil && m[1] == d {
+			return true
+		}
+	}
+	return false
+}
 
 func readLines(path string) []string {
 	data, err := os.ReadFile(path)
@@ -77,6 +92,9 @@ func usage() {
 	fmt.Print(`notie — local notes in ~/.notie
 
   notie add "text"        append to today's journal (~/.notie/<date>/journal.md)
+  notie add <date> [HH:MM] "text"
+                          add to an older day, in chronological position
+  notie did <date> "text" record a task that was already done on that day
   notie log "cmd"         append a shell command to today's audit trail
                           (~/.notie/<date>/shell.md — wired to a zsh preexec hook)
   notie addi "text"       append to important.md
@@ -94,6 +112,7 @@ func usage() {
   notie important         interactive important-notes browser (day-level UI)
   notie remember          interactive remember-notes list
   notie cache             build datecache.md entries for past days (journal + tasks done)
+  notie cache <date>      re-summarize one day (after a retroactive edit)
   notie show [what]       print a file (journal|shell|remember|important|task|datecache|YYYY-MM-DD)
   notie show shell [date] print a day's shell audit trail (default today)
 
@@ -105,10 +124,50 @@ func usage() {
 
 // ---- add / addi / remember ----
 
-func cmdAdd(text string) {
-	path := filepath.Join(notieDir(), today(), "journal.md")
-	appendLine(path, "Journal — "+today(), fmt.Sprintf("- %s — %s", clock(), text))
+// addJournal writes a journal entry to date's journal, inserted after the last
+// entry with an earlier timestamp so the day stays in chronological order —
+// retroactive entries land in the right place instead of at the end. Entries
+// already in the file are never reordered. Silent, so the TUI can call it
+// without corrupting its raw-mode screen.
+func addJournal(date, hhmm, text string) {
+	path := journalPath(date)
+	line := fmt.Sprintf("- %s — %s", hhmm, text)
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		appendLine(path, "Journal — "+date, line)
+	} else {
+		lines := readLines(path)
+		pos := len(lines)
+		for i, l := range lines {
+			m := entryRe.FindStringSubmatch(l)
+			if m == nil {
+				continue
+			}
+			if m[1] > hhmm {
+				pos = i
+				break
+			}
+			pos = i + 1
+		}
+		out := make([]string, 0, len(lines)+1)
+		out = append(out, lines[:pos]...)
+		out = append(out, line)
+		out = append(out, lines[pos:]...)
+		writeLines(path, out)
+	}
+}
+
+func cmdAdd(date, hhmm, text string) {
+	addJournal(date, hhmm, text)
 	fmt.Println("journal: " + text)
+	staleCacheHint(date)
+}
+
+// staleCacheHint nudges the user to refresh a day's summary after a retroactive
+// write. Silent for today, which is never cached.
+func staleCacheHint(date string) {
+	if date != today() && cachedDate(date) {
+		fmt.Printf("note: %s is already summarized — run 'notie cache %s' to refresh\n", date, date)
+	}
 }
 
 func cmdDated(file, header, label, text string) {
@@ -253,6 +312,18 @@ func taskEdit(idStr, action string) {
 	fmt.Printf("task #%s: %s\n", idStr, action)
 }
 
+// cmdDid records a task that was already finished — added and done on the same
+// past date. Priority is fixed at normal: a completed task's priority is moot,
+// but the marker keeps the line matching taskFullRe. Field order matters —
+// (added …) must precede (done …), or doneTasksByDate silently drops it.
+func cmdDid(date, desc string) {
+	id := nextID()
+	appendLine(taskPath(), "Tasks",
+		fmt.Sprintf("- [x] #%d !1 %s (added %s) (done %s)", id, desc, date, date))
+	fmt.Printf("recorded #%d as done on %s\n", id, date)
+	staleCacheHint(date)
+}
+
 func cmdTask(args []string) {
 	if len(args) == 0 {
 		if isTTY() {
@@ -286,7 +357,9 @@ func cmdTask(args []string) {
 
 // ---- datecache ----
 
-var entryRe = regexp.MustCompile(`^- \d{2}:\d{2} — `)
+// entryRe matches a journal entry's timestamp prefix. The capture group is used
+// to order retroactive inserts; ReplaceAllString with "" strips the prefix.
+var entryRe = regexp.MustCompile(`^- (\d{2}:\d{2}) — `)
 
 // journalEntries returns the entry texts of a journal file, timestamps stripped.
 func journalEntries(path string) []string {
@@ -358,17 +431,26 @@ func summarize(journalPath string, done []string) string {
 // cmdCache summarizes each past day — its journal plus the tasks closed that
 // day — into one line in datecache.md. Idempotent: skips dates already cached.
 // Catch-up safe: processes every past date, so missed runs (laptop asleep) are
-// filled in on the next run.
-func cmdCache() {
+// filled in on the next run. A non-empty force re-summarizes just that date,
+// which is how a retroactively edited day gets a fresh one-liner.
+func cmdCache(force string) {
 	dir := notieDir()
-	cachePath := filepath.Join(dir, "datecache.md")
+	cachePath := datecachePath()
+	if force != "" && force >= today() {
+		fatal("cannot cache %s — only past days are summarized", force)
+	}
 	if _, err := os.Stat(cachePath); os.IsNotExist(err) {
 		appendLine(cachePath, "Date cache", "")
 	}
 	cached := map[string]bool{}
+	dropped := false
 	var header, entries []string
 	for _, l := range readLines(cachePath) {
 		if m := dcLineRe.FindStringSubmatch(l); m != nil {
+			if m[1] == force {
+				dropped = true // omit, so the date is treated as uncached below
+				continue
+			}
 			cached[m[1]] = true
 			entries = append(entries, l)
 		} else if strings.TrimSpace(l) != "" || len(entries) == 0 {
@@ -390,24 +472,34 @@ func cmdCache() {
 	}
 	var dates []string
 	for d := range candidates {
-		if d < today() && !cached[d] {
+		if d < today() && !cached[d] && (force == "" || d == force) {
 			dates = append(dates, d)
 		}
 	}
 	sort.Strings(dates) // chronological, and deterministic across runs
 	added := 0
 	for _, d := range dates {
-		if s := summarize(filepath.Join(dir, d, "journal.md"), done[d]); s != "" {
+		if s := summarize(journalPath(d), done[d]); s != "" {
 			entries = append(entries, fmt.Sprintf("- %s: %s", d, s))
 			added++
 		}
 	}
-	if added > 0 {
+	// dropped alone still needs a write: a forced date whose content has since
+	// been emptied must lose its stale line.
+	if added > 0 || dropped {
 		sort.Strings(entries)
 		if len(header) == 0 || header[len(header)-1] != "" {
 			header = append(header, "")
 		}
 		writeLines(cachePath, append(header, entries...))
+	}
+	if force != "" {
+		if added > 0 {
+			fmt.Printf("datecache: %s refreshed\n", force)
+		} else {
+			fmt.Printf("datecache: nothing to summarize for %s\n", force)
+		}
+		return
 	}
 	fmt.Printf("datecache: %d day(s) added\n", added)
 }
@@ -463,11 +555,11 @@ func cmdShow(what string) {
 	dir := notieDir()
 	switch what {
 	case "journal":
-		path := filepath.Join(dir, today(), "journal.md")
+		path := journalPath(today())
 		if _, err := os.Stat(path); err != nil {
 			if d := latestDateWith("journal.md"); d != "" {
 				fmt.Printf("no journal for today; latest is %s:\n\n", d)
-				printFile(filepath.Join(dir, d, "journal.md"), "empty")
+				printFile(journalPath(d), "empty")
 				return
 			}
 			fmt.Println("no journal entries yet — try: notie add \"did something\"")
@@ -480,7 +572,7 @@ func cmdShow(what string) {
 		printTasks()
 	default:
 		if dateRe.MatchString(what) {
-			printFile(filepath.Join(dir, what, "journal.md"), "no journal for "+what)
+			printFile(journalPath(what), "no journal for "+what)
 			return
 		}
 		fatal("unknown file %q (journal|remember|important|task|datecache|YYYY-MM-DD)", what)
@@ -501,10 +593,39 @@ func main() {
 			fatal("missing text")
 		}
 	}
+	// pastDate validates an optional retroactive date argument.
+	pastDate := func(d string) string {
+		if d > today() {
+			fatal("cannot write to a future date: %s", d)
+		}
+		return d
+	}
 	switch args[0] {
 	case "add":
-		requireText()
-		cmdAdd(text)
+		// optional positional date, then optional HH:MM — same sniffing style as
+		// `notie show shell <date>`. The time is only looked for after a date
+		// matched, so `notie add "14:05 standup"` stays plain text.
+		d, hhmm, i := today(), clock(), 1
+		if len(args) > i && dateRe.MatchString(args[i]) {
+			d, i = pastDate(args[i]), i+1
+			if len(args) > i && timeRe.MatchString(args[i]) {
+				hhmm, i = args[i], i+1
+			}
+		}
+		body := strings.TrimSpace(strings.Join(args[i:], " "))
+		if body == "" {
+			fatal("missing text")
+		}
+		cmdAdd(d, hhmm, body)
+	case "did":
+		if len(args) < 2 || !dateRe.MatchString(args[1]) {
+			fatal("usage: notie did <YYYY-MM-DD> \"text\"")
+		}
+		desc := strings.TrimSpace(strings.Join(args[2:], " "))
+		if desc == "" {
+			fatal("missing text — notie did %s \"text\"", args[1])
+		}
+		cmdDid(pastDate(args[1]), desc)
 	case "log":
 		cmdLog(text)
 	case "radd", "rjournal":
@@ -549,7 +670,14 @@ func main() {
 	case "task":
 		cmdTask(args[1:])
 	case "cache":
-		cmdCache()
+		force := ""
+		if len(args) > 1 {
+			if !dateRe.MatchString(args[1]) {
+				fatal("usage: notie cache [YYYY-MM-DD]")
+			}
+			force = args[1]
+		}
+		cmdCache(force)
 	case "show":
 		what := "journal"
 		if len(args) > 1 {
