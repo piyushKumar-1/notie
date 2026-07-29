@@ -92,8 +92,10 @@ Dates are plain `YYYY-MM-DD` strings, so a date `d` is in range when
    ls -1 "$DIR" | grep -E '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' | awk -v a="$start" -v b="$end" '$1>=a && $1<=b'
    ```
    Read `<dir>/<date>/journal.md` for each. For **older** days you can lean on
-   `<dir>/datecache.md` one-liners to keep context small — but note the current
-   day is never cached, so always read today's journal directly.
+   `<dir>/datecache.md` one-liners to keep context small — they cover both the
+   journal and the tasks closed that day, and a cached date may have no journal
+   directory at all if only tasks were closed on it. Note the current day is
+   never cached, so always read today's journal directly.
 
 2. **Tasks.** Read `<dir>/task.md` and classify every task line:
    - **Completed this period** — `[x]` whose `(done <date>)` is in range.
