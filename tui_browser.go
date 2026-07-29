@@ -24,7 +24,9 @@ type browserCfg struct {
 	label, icon string
 	dates       func() []string          // days that have content (any order)
 	dayLines    func(d string) []string  // that day's raw "- HH:MM ..." lines
-	add         func(text string)        // nil disables 'a'
+	// add writes to the selected day and returns the date it actually wrote to,
+	// which is not always d — see importantBrowser. nil disables 'a'.
+	add func(d, text string) string
 	summaries   func() map[string]string // nil: no per-day summary line
 	fallback    func()                   // plain output when raw mode fails
 	empty       string                   // message when there are no days
@@ -52,15 +54,12 @@ func journalBrowser() browserCfg {
 		label: "journal", icon: iJournal,
 		dates: datesWithFile("journal.md"),
 		dayLines: func(d string) []string {
-			return readLines(filepath.Join(notieDir(), d, "journal.md"))
+			return readLines(journalPath(d))
 		},
-		add: func(text string) {
-			appendLine(filepath.Join(notieDir(), today(), "journal.md"),
-				"Journal — "+today(), fmt.Sprintf("- %s — %s", clock(), text))
-		},
+		add: func(d, text string) string { addJournal(d, clock(), text); return d },
 		summaries: func() map[string]string {
 			m := map[string]string{}
-			for _, l := range readLines(filepath.Join(notieDir(), "datecache.md")) {
+			for _, l := range readLines(datecachePath()) {
 				if s := dcLineRe.FindStringSubmatch(l); s != nil {
 					m[s[1]] = s[2]
 				}
@@ -109,8 +108,11 @@ func importantBrowser() browserCfg {
 			}
 			return out
 		},
-		add: func(text string) {
+		// important.md is a flat, append-only file rendered in raw order, so it
+		// always takes today's date — the selected day is deliberately ignored.
+		add: func(_, text string) string {
 			appendLine(path, "Important", fmt.Sprintf("- %s %s — %s", today(), clock(), text))
+			return today()
 		},
 		fallback: func() { cmdShow("important") },
 		empty:    "nothing important yet — press a to add",
@@ -131,6 +133,15 @@ type browserTUI struct {
 	searchMode byte // 0: dates+content ('/') · 'd': dates (:ff) · 'c': content (:fg)
 	status     string
 	quit       bool
+}
+
+// addTarget is the day 'a' writes to: whichever date is selected, falling back
+// to today when there are no days yet (the empty browser invites 'a').
+func (t *browserTUI) addTarget() string {
+	if t.cursor < 0 || t.cursor >= len(t.dates) {
+		return today()
+	}
+	return t.dates[t.cursor]
 }
 
 func (t *browserTUI) reload() {
@@ -254,7 +265,7 @@ func (t *browserTUI) render() {
 	b.WriteString(fmt.Sprintf("\x1b[%d;1H", rows))
 	switch {
 	case t.input != nil && t.inputCh == 'a':
-		b.WriteString(cGreen + " + today: " + cReset + *t.input + cCursor + " " + cReset)
+		b.WriteString(cGreen + " + " + t.addTarget() + ": " + cReset + *t.input + cCursor + " " + cReset)
 	case t.input != nil && t.inputCh == '/':
 		b.WriteString(cAccent + " /" + cReset + *t.input + cCursor + " " + cReset)
 	case t.input != nil && t.inputCh == ':':
@@ -381,14 +392,18 @@ func runBrowser(cfg browserCfg) {
 				t.input = nil
 				switch {
 				case kind == 'a' && val != "":
-					t.cfg.add(val)
+					// where it landed, which may differ from the selected day
+					wrote := t.cfg.add(t.addTarget(), val)
 					t.reload()
 					for i, d := range t.dates {
-						if d == today() {
+						if d == wrote {
 							t.cursor, t.contentOff = i, 0
 						}
 					}
-					t.status = cGreen + "added to today" + cReset
+					t.status = cGreen + "added to " + wrote + cReset
+					if t.cfg.summaries != nil && cachedDate(wrote) {
+						t.status += cGrey + " · stale summary — notie cache " + wrote + cReset
+					}
 				case kind == '/':
 					t.search, t.searchMode = val, 0
 					if val != "" && len(t.dates) > 0 && !t.dayMatches(t.dates[t.cursor], val) {

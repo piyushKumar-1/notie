@@ -108,7 +108,7 @@ func cmdRecord(target string) {
 	}
 	switch target {
 	case "journal":
-		cmdAdd(text)
+		cmdAdd(today(), clock(), text)
 	case "important":
 		cmdDated("important.md", "Important", "important", text)
 	case "remember":

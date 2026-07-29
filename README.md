@@ -22,6 +22,9 @@ manual steps.
 
 ```
 notie add "text"        append to today's journal (~/.notie/<date>/journal.md)
+notie add <date> [HH:MM] "text"
+                        add to an older day, in chronological position
+notie did <date> "text" record a task that was already done on that day
 notie log "cmd"         append a shell command to today's audit trail
 notie addi "text"       append to important.md
 notie remember "text"   append to remember.md
@@ -35,7 +38,8 @@ notie journal           interactive journal browser (dates sidebar + / search)
 notie shell             interactive shell-audit browser
 notie important         interactive important-notes browser
 notie remember          interactive remember-notes list
-notie cache             build datecache.md one-line summaries for past days
+notie cache [<date>]    build datecache.md one-line summaries for past days
+                        (a date re-summarizes just that day)
 notie show [what]       print a file (journal|shell|remember|important|task|datecache|YYYY-MM-DD)
 ```
 
@@ -44,8 +48,25 @@ TUI keys: `j`/`k` move · `gg`/`G` top/bottom · `x` toggle (tasks)
 · `a` add · `/` search · `n`/`N` next/prev · `q` or `:q` quit
 · `:ff <pat>` find date files · `:fg <pat>` find mentions
 
+In the journal browser, `a` adds to the **selected** day, so scrolling back and
+pressing `a` is the interactive way to write up a day you missed.
+
 Task lists are grouped by priority (`!0` → `!1` → `!2`), oldest first within a
 group; tasks predating priorities sort last.
+
+## Writing things up late
+
+Both retroactive commands take a past date and refuse a future one:
+
+```sh
+notie add 2026-07-23 "reviewed the Pomerium upgrade plan"   # timestamped now
+notie add 2026-07-23 14:05 "reviewed the upgrade plan"      # explicit time
+notie did 2026-07-23 "rotated the staging DB credentials"   # already-done task
+```
+
+Entries are inserted in chronological position rather than appended, so a day
+always reads in order. If the day already has a `datecache.md` summary, the
+command says so — run `notie cache <date>` to rebuild that one line.
 
 ## Data layout
 
