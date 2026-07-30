@@ -42,12 +42,28 @@ notie cache [<date>]    build datecache.md one-line summaries for past days
                         (a date re-summarizes just that day)
 notie show [what]       print a file (journal|shell|remember|important|task|datecache|YYYY-MM-DD)
 notie upgrade           clone the public repo, rebuild, and replace this binary
+                        (--check reports what's available, installs nothing)
+notie version           print the commit this binary was built from
 ```
 
 `notie upgrade` shallow-clones the public repo to a temp dir, builds it with the
 Go toolchain, and installs the fresh binary over the running one (in place, via
-an atomic rename). Needs `git` and `go` on your `PATH`. Set `NOTIE_REPO` to
-upgrade from a fork or local checkout instead of the default public repo.
+an atomic rename). Set `NOTIE_REPO` to upgrade from a fork or local checkout
+instead of the default public repo.
+
+It first asks the remote for its current commit and compares it with the one
+`notie version` reports, so an upgrade with nothing new costs a single network
+round-trip instead of a clone and a rebuild:
+
+```sh
+notie upgrade --check   # "up to date (e0a4c93)" or "upgrade available: a → b"
+notie upgrade           # no-ops when already current
+notie upgrade --force   # rebuild and reinstall regardless
+```
+
+Needs `git` on your `PATH`, and Go to build — either on `PATH` or the toolchain
+`setup.sh` caches in `~/.cache/notie/go`. If the `notie-review` Claude Code
+skill is installed, an upgrade refreshes it too.
 
 TUI keys: `j`/`k` move · `gg`/`G` top/bottom · `x` toggle (tasks)
 · `0`/`1`/`2` set priority (tasks) · `.` show/hide done (tasks) · `dd` delete
