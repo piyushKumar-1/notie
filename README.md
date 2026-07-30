@@ -41,7 +41,13 @@ notie remember          interactive remember-notes list
 notie cache [<date>]    build datecache.md one-line summaries for past days
                         (a date re-summarizes just that day)
 notie show [what]       print a file (journal|shell|remember|important|task|datecache|YYYY-MM-DD)
+notie upgrade           clone the public repo, rebuild, and replace this binary
 ```
+
+`notie upgrade` shallow-clones the public repo to a temp dir, builds it with the
+Go toolchain, and installs the fresh binary over the running one (in place, via
+an atomic rename). Needs `git` and `go` on your `PATH`. Set `NOTIE_REPO` to
+upgrade from a fork or local checkout instead of the default public repo.
 
 TUI keys: `j`/`k` move · `gg`/`G` top/bottom · `x` toggle (tasks)
 · `0`/`1`/`2` set priority (tasks) · `.` show/hide done (tasks) · `dd` delete

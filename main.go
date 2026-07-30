@@ -115,6 +115,7 @@ func usage() {
   notie cache <date>      re-summarize one day (after a retroactive edit)
   notie show [what]       print a file (journal|shell|remember|important|task|datecache|YYYY-MM-DD)
   notie show shell [date] print a day's shell audit trail (default today)
+  notie upgrade           clone the public repo, rebuild, and replace this binary
 
   TUI keys: j/k move · gg/G top/bottom · x toggle (tasks) · 0/1/2 priority
             . show/hide done · dd delete · a add · / search · n/N next/prev
@@ -692,6 +693,8 @@ func main() {
 			return
 		}
 		cmdShow(what)
+	case "upgrade":
+		cmdUpgrade()
 	case "help", "-h", "--help":
 		usage()
 	default:
