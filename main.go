@@ -99,7 +99,7 @@ func usage() {
                           (~/.notie/<date>/shell.md — wired to a zsh preexec hook)
   notie addi "text"       append to important.md
   notie remember "text"   append to remember.md
-  notie task <0|1|2> "text"  add a task (0 high · 1 normal · 2 low), then show tasks
+  notie task [0|1|2] "text"  add a task (0 high · 1 normal · 2 low; default 2)
   notie radd              record voice, transcribe, append to today's journal
                           (also: rjournal · raddi/rimportant · rremember · rtask)
   notie task              interactive task list (done tasks hidden — . shows them)
@@ -216,6 +216,9 @@ func taskPath() string {
 
 var taskRe = regexp.MustCompile(`^- \[[ x]\] #(\d+) `)
 var taskPriRe = regexp.MustCompile(`^- \[[ x]\] #\d+ !([0-2]) `)
+
+// defaultPri is the priority a task gets when none is given.
+const defaultPri = "2"
 
 // taskPri returns a task's priority (0 high · 1 normal · 2 low). Lines
 // without a marker (pre-priority tasks) sort after every prioritized group.
@@ -344,17 +347,21 @@ func cmdTask(args []string) {
 			fatal("usage: notie task %s <id>", args[0])
 		}
 		taskEdit(args[1], args[0])
-	case "0", "1", "2":
-		desc := strings.TrimSpace(strings.Join(args[1:], " "))
+	default:
+		// A leading 0|1|2 sets the priority; without one the task takes the
+		// default, so "notie task \"buy milk\"" works.
+		pri, rest := defaultPri, args
+		if args[0] == "0" || args[0] == "1" || args[0] == "2" {
+			pri, rest = args[0], args[1:]
+		}
+		desc := strings.TrimSpace(strings.Join(rest, " "))
 		if desc == "" {
-			fatal("missing text — notie task %s \"text\"", args[0])
+			fatal("missing text — notie task [0|1|2] \"text\"")
 		}
 		id := nextID()
-		appendLine(taskPath(), "Tasks", fmt.Sprintf("- [ ] #%d !%s %s (added %s)", id, args[0], desc, today()))
+		appendLine(taskPath(), "Tasks", fmt.Sprintf("- [ ] #%d !%s %s (added %s)", id, pri, desc, today()))
 		fmt.Printf("added task #%d\n---\n", id)
 		printTasks()
-	default:
-		fatal("priority required — notie task <0|1|2> \"text\" (0 high · 1 normal · 2 low)")
 	}
 }
 

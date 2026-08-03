@@ -28,7 +28,7 @@ notie did <date> "text" record a task that was already done on that day
 notie log "cmd"         append a shell command to today's audit trail
 notie addi "text"       append to important.md
 notie remember "text"   append to remember.md
-notie task <0|1|2> "text"  add a task (0 high · 1 normal · 2 low), then show tasks
+notie task [0|1|2] "text"  add a task (0 high · 1 normal · 2 low; default 2)
 notie radd              record voice, transcribe, append to today's journal
                         (also: rjournal · raddi/rimportant · rremember · rtask)
 notie task              interactive task list (done tasks hidden by default)
@@ -74,7 +74,9 @@ In the journal browser, `a` adds to the **selected** day, so scrolling back and
 pressing `a` is the interactive way to write up a day you missed.
 
 Task lists are grouped by priority (`!0` → `!1` → `!2`), oldest first within a
-group; tasks predating priorities sort last.
+group; tasks predating priorities sort last. Priority is optional everywhere a
+task is added — omit it and the task gets `!2`. The interactive list hides task
+ids; they still live in `task.md` for `notie task done <id>`.
 
 ## Writing things up late
 
