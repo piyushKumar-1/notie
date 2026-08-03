@@ -101,11 +101,12 @@ func (t *taskTUI) row(l string, selected bool, cols int) (string, int) {
 	if selected {
 		marker = cAccent + cBold + iCursor + cReset + " "
 	}
-	// plain layout: "❯ ○ #12 !0 desc · date"
-	fixed := 2 + 2 + runeLen("#"+m[2]) + 1 + priW + runeLen(meta)
+	// plain layout: "❯ ○ !0 desc · date" — ids stay in the file (and in
+	// `notie task done <id>`), but are noise in the list.
+	fixed := 2 + 2 + priW + runeLen(meta)
 	desc := truncRunes(m[4], max(4, cols-fixed))
 	width := fixed + runeLen(desc)
-	styled := marker + icon + " " + cAccent + "#" + m[2] + cReset + " " + pri +
+	styled := marker + icon + " " + pri +
 		descStyle + highlight(desc, t.search, descStyle) + cReset +
 		cGrey + meta + cReset
 	return styled, width
@@ -161,7 +162,7 @@ func (t *taskTUI) render() {
 	case t.input != nil && t.inputCh == 'a':
 		b.WriteString(cYellow + " + " + cReset + *t.input + cCursor + " " + cReset)
 		if *t.input == "" {
-			b.WriteString(cGrey + " <0|1|2> text — priority first" + cReset)
+			b.WriteString(cGrey + " text — prefix 0|1|2 to set priority (default " + defaultPri + ")" + cReset)
 		}
 	case t.input != nil && t.inputCh == '/':
 		b.WriteString(cAccent + " /" + cReset + *t.input + cCursor + " " + cReset)
@@ -208,25 +209,25 @@ func (t *taskTUI) delete() {
 	t.status = cRed + "deleted" + cReset
 }
 
-// addTask parses "<0|1|2> description" — priority is mandatory.
+// addTask parses "[0|1|2] description" — a leading digit sets the priority,
+// otherwise the task takes the default.
 func (t *taskTUI) addTask(in string) {
 	in = strings.TrimSpace(in)
 	if in == "" {
 		return
 	}
-	pri, desc := "", ""
+	pri, desc := defaultPri, in
 	if len(in) > 1 && in[0] >= '0' && in[0] <= '2' && in[1] == ' ' {
 		pri, desc = in[:1], strings.TrimSpace(in[1:])
 	}
-	if pri == "" || desc == "" {
-		t.status = cRed + "priority required — type: <0|1|2> text" + cReset
+	if desc == "" {
 		return
 	}
 	id := nextID()
 	appendLine(taskPath(), "Tasks", fmt.Sprintf("- [ ] #%d !%s %s (added %s)", id, pri, desc, today()))
 	t.reload()
 	t.cursorTo(fmt.Sprintf("%d", id))
-	t.status = cGreen + fmt.Sprintf("added #%d !%s", id, pri) + cReset
+	t.status = cGreen + "added !" + pri + cReset
 }
 
 // setPri rewrites the selected task's priority marker and follows the task
@@ -248,7 +249,7 @@ func (t *taskTUI) setPri(p byte) {
 	id := taskRe.FindStringSubmatch(t.lines[i])[1]
 	t.save()
 	t.cursorTo(id)
-	t.status = cGrey + "#" + id + " → !" + string(p) + cReset
+	t.status = cGrey + "priority → !" + string(p) + cReset
 }
 
 // findNext moves the cursor to the next/prev task matching the search.
