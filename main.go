@@ -6,7 +6,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -97,6 +99,9 @@ func usage() {
   notie did <date> "text" record a task that was already done on that day
   notie log "cmd"         append a shell command to today's audit trail
                           (~/.notie/<date>/shell.md — wired to a zsh preexec hook)
+  notie shell-init        print the zsh audit hook — source it with
+                          eval "$(notie shell-init)" (works under nix/home-manager)
+  notie setup-claude-hook register a Claude Code hook so its shell commands are logged
   notie addi "text"       append to important.md
   notie remember "text"   append to remember.md
   notie task [0|1|2] "text"  add a task (0 high · 1 normal · 2 low; default 2)
@@ -111,6 +116,7 @@ func usage() {
   notie shell             interactive shell-audit browser (same day-level UI)
   notie important         interactive important-notes browser (day-level UI)
   notie remember          interactive remember-notes list
+  notie settings          interactive settings (accent, task priority, voice, hooks)
   notie cache             build datecache.md entries for past days (journal + tasks done)
   notie cache <date>      re-summarize one day (after a retroactive edit)
   notie show [what]       print a file (journal|shell|remember|important|task|datecache|YYYY-MM-DD)
@@ -119,8 +125,9 @@ func usage() {
                           (--check reports what's available, installs nothing)
   notie version           print the commit this binary was built from
 
-  TUI keys: j/k move · gg/G top/bottom · x toggle (tasks) · 0/1/2 priority
-            . show/hide done · dd delete · a add · / search · n/N next/prev
+  TUI keys: ↑/↓ (j/k) move · ←/→ (h/l) switch pane in the day browsers
+            gg/G top/bottom · x toggle (tasks) · 0/1/2 priority · . show/hide done
+            a add · e edit · dd delete · / search · n/N next/prev · t today
             q/:q quit · :ff <pat> find date files · :fg <pat> find mentions
 `)
 }
@@ -168,7 +175,7 @@ func cmdAdd(date, hhmm, text string) {
 // staleCacheHint nudges the user to refresh a day's summary after a retroactive
 // write. Silent for today, which is never cached.
 func staleCacheHint(date string) {
-	if date != today() && cachedDate(date) {
+	if warnStale() && date != today() && cachedDate(date) {
 		fmt.Printf("note: %s is already summarized — run 'notie cache %s' to refresh\n", date, date)
 	}
 }
@@ -181,23 +188,191 @@ func cmdDated(file, header, label, text string) {
 
 // ---- shell audit trail ----
 
-// cmdLog appends a shell command to today's shell.md. Silent on success and
-// tolerant of empty input: it is invoked by a zsh preexec hook on every
-// interactive command, so it must never clutter the prompt.
-func cmdLog(text string) {
+// logShell appends a shell command to today's shell.md, tagged with marker
+// ("$" for an interactive command, iAgent for one run by an agent). Silent on
+// success and tolerant of empty input: it is invoked by hooks on every command,
+// so it must never clutter the prompt.
+func logShell(text, cwd, marker string) {
 	text = strings.Join(strings.Fields(text), " ")
 	if text == "" {
 		return
 	}
 	loc := ""
-	if wd, err := os.Getwd(); err == nil {
-		if home, err := os.UserHomeDir(); err == nil && strings.HasPrefix(wd, home) {
-			wd = "~" + strings.TrimPrefix(wd, home)
+	if cwd != "" {
+		if home, err := os.UserHomeDir(); err == nil && strings.HasPrefix(cwd, home) {
+			cwd = "~" + strings.TrimPrefix(cwd, home)
 		}
-		loc = " (" + wd + ")"
+		loc = " (" + cwd + ")"
 	}
 	path := filepath.Join(notieDir(), today(), "shell.md")
-	appendLine(path, "Shell — "+today(), fmt.Sprintf("- %s%s $ %s", clock(), loc, text))
+	appendLine(path, "Shell — "+today(), fmt.Sprintf("- %s%s %s %s", clock(), loc, marker, text))
+}
+
+// cmdLog records an interactive shell command (the zsh preexec hook path).
+func cmdLog(text string) {
+	cwd, _ := os.Getwd()
+	logShell(text, cwd, "$")
+}
+
+// cmdLogHook records a command run by Claude Code. It reads the tool's
+// PreToolUse JSON ({"cwd":…,"tool_input":{"command":…}}) from stdin — the shape
+// Claude Code pipes to a PreToolUse hook — and tags it as agent-run. Always
+// exits cleanly so it can never block the tool.
+func cmdLogHook() {
+	data, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		return
+	}
+	var in struct {
+		Cwd       string `json:"cwd"`
+		ToolInput struct {
+			Command string `json:"command"`
+		} `json:"tool_input"`
+	}
+	if json.Unmarshal(data, &in) != nil {
+		return
+	}
+	logShell(in.ToolInput.Command, in.Cwd, iAgent)
+}
+
+// cmdShellInit prints the zsh preexec hook. Sourcing it (eval "$(notie
+// shell-init)") keeps the hook in the binary, so it survives on nix / home-
+// manager setups where ~/.zshrc is read-only or regenerated.
+func cmdShellInit() {
+	fmt.Print(`# notie shell audit trail — source via: eval "$(notie shell-init)"
+_notie_log() { command notie log "$1" >/dev/null 2>&1 }
+autoload -Uz add-zsh-hook
+add-zsh-hook preexec _notie_log
+`)
+}
+
+// claudeSettingsPath returns the ~/.claude dir and its settings.json path.
+func claudeSettingsPath() (dir, path string, err error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", "", err
+	}
+	dir = filepath.Join(home, ".claude")
+	return dir, filepath.Join(dir, "settings.json"), nil
+}
+
+// loadClaudeSettings reads settings.json into a map; a missing or empty file
+// yields an empty map, but malformed JSON is an error (we must not clobber it).
+func loadClaudeSettings(path string) (map[string]any, error) {
+	s := map[string]any{}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return s, nil
+		}
+		return nil, err
+	}
+	if strings.TrimSpace(string(data)) == "" {
+		return s, nil
+	}
+	if err := json.Unmarshal(data, &s); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+// claudeHookIndex returns the PreToolUse slice and the index of the group
+// holding notie's log-hook (or -1 if absent).
+func claudeHookIndex(s map[string]any) ([]any, int) {
+	hooks, _ := s["hooks"].(map[string]any)
+	pre, _ := hooks["PreToolUse"].([]any)
+	for i, g := range pre {
+		gm, _ := g.(map[string]any)
+		hl, _ := gm["hooks"].([]any)
+		for _, h := range hl {
+			hm, _ := h.(map[string]any)
+			if cmd, _ := hm["command"].(string); strings.Contains(cmd, "notie log-hook") {
+				return pre, i
+			}
+		}
+	}
+	return pre, -1
+}
+
+// claudeHookInstalled reports whether the log-hook is registered.
+func claudeHookInstalled() bool {
+	_, path, err := claudeSettingsPath()
+	if err != nil {
+		return false
+	}
+	s, err := loadClaudeSettings(path)
+	if err != nil {
+		return false
+	}
+	_, i := claudeHookIndex(s)
+	return i >= 0
+}
+
+// setClaudeHook installs (on) or removes (off) notie's Bash PreToolUse hook,
+// preserving all other settings. Returns the resulting state.
+func setClaudeHook(on bool) (bool, error) {
+	dir, path, err := claudeSettingsPath()
+	if err != nil {
+		return false, err
+	}
+	s, err := loadClaudeSettings(path)
+	if err != nil {
+		return false, err
+	}
+	pre, idx := claudeHookIndex(s)
+	switch {
+	case on && idx >= 0:
+		return true, nil // already installed
+	case !on && idx < 0:
+		return false, nil // already absent
+	case on:
+		pre = append(pre, map[string]any{
+			"matcher": "Bash",
+			"hooks":   []any{map[string]any{"type": "command", "command": "notie log-hook"}},
+		})
+	default:
+		pre = append(pre[:idx], pre[idx+1:]...)
+	}
+	hooks, _ := s["hooks"].(map[string]any)
+	if hooks == nil {
+		hooks = map[string]any{}
+	}
+	if len(pre) == 0 {
+		delete(hooks, "PreToolUse")
+	} else {
+		hooks["PreToolUse"] = pre
+	}
+	if len(hooks) == 0 {
+		delete(s, "hooks")
+	} else {
+		s["hooks"] = hooks
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return idx >= 0, err
+	}
+	out, err := json.MarshalIndent(s, "", "  ")
+	if err != nil {
+		return idx >= 0, err
+	}
+	if err := os.WriteFile(path, append(out, '\n'), 0o644); err != nil {
+		return idx >= 0, err
+	}
+	return on, nil
+}
+
+// cmdSetupClaudeHook registers the Bash PreToolUse hook so Claude Code's shell
+// commands land in notie's audit trail. Idempotent.
+func cmdSetupClaudeHook() {
+	_, path, _ := claudeSettingsPath()
+	if claudeHookInstalled() {
+		fmt.Println("notie: Claude Code hook already installed in " + path)
+		return
+	}
+	if _, err := setClaudeHook(true); err != nil {
+		fatal("updating %s: %v", path, err)
+	}
+	fmt.Println("notie: added a Bash PreToolUse hook to " + path)
+	fmt.Println("      Claude Code will now log its shell commands (restart Claude Code to apply)")
 }
 
 // ---- tasks ----
@@ -216,9 +391,6 @@ func taskPath() string {
 
 var taskRe = regexp.MustCompile(`^- \[[ x]\] #(\d+) `)
 var taskPriRe = regexp.MustCompile(`^- \[[ x]\] #\d+ !([0-2]) `)
-
-// defaultPri is the priority a task gets when none is given.
-const defaultPri = "2"
 
 // taskPri returns a task's priority (0 high · 1 normal · 2 low). Lines
 // without a marker (pre-priority tasks) sort after every prioritized group.
@@ -350,7 +522,7 @@ func cmdTask(args []string) {
 	default:
 		// A leading 0|1|2 sets the priority; without one the task takes the
 		// default, so "notie task \"buy milk\"" works.
-		pri, rest := defaultPri, args
+		pri, rest := defaultPri(), args
 		if args[0] == "0" || args[0] == "1" || args[0] == "2" {
 			pri, rest = args[0], args[1:]
 		}
@@ -592,6 +764,7 @@ func cmdShow(what string) {
 // ---- main ----
 
 func main() {
+	applyConfig()
 	args := os.Args[1:]
 	if len(args) == 0 {
 		usage()
@@ -638,6 +811,12 @@ func main() {
 		cmdDid(pastDate(args[1]), desc)
 	case "log":
 		cmdLog(text)
+	case "log-hook":
+		cmdLogHook()
+	case "shell-init":
+		cmdShellInit()
+	case "setup-claude-hook":
+		cmdSetupClaudeHook()
 	case "radd", "rjournal":
 		cmdRecord("journal")
 	case "raddi", "rimportant":
@@ -679,6 +858,12 @@ func main() {
 		}
 	case "task":
 		cmdTask(args[1:])
+	case "settings", "config":
+		if isTTY() {
+			runSettingsTUI()
+		} else {
+			cmdShowSettings()
+		}
 	case "cache":
 		force := ""
 		if len(args) > 1 {

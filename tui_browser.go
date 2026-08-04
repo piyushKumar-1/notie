@@ -1,7 +1,11 @@
 // Day browser: dates sidebar on the left, the selected day's entries on the
 // right. Backs `notie journal`, `notie shell` and `notie important`.
-// / searches dates AND content · :ff finds dates (live) · :fg greps content ·
-// n/N jump between matching days · q or :q quits.
+//
+// Two panes with a focus model: ↑/↓ move within the focused pane, ←/→ switch
+// focus between the date menu and that day's entries. In the entries pane you
+// can edit (e) and delete (dd) — journal and important are editable; shell is a
+// read-only audit trail. / searches dates AND content · :ff finds dates (live) ·
+// :fg greps content · n/N jump between matching days · q or :q quits.
 package main
 
 import (
@@ -17,19 +21,27 @@ import (
 
 const sideW = 14 // " ▸ 2026-07-14 "
 
+// browserEntryRe matches a generic "- HH:MM rest" line (shell audit entries).
 var browserEntryRe = regexp.MustCompile(`^- (\d{2}:\d{2}) (.*)$`)
+
+// dayEntry is one selectable row in the content pane: a timestamp and its text.
+type dayEntry struct{ ts, text string }
 
 // browserCfg adapts the day browser to one data source.
 type browserCfg struct {
 	label, icon string
-	dates       func() []string          // days that have content (any order)
-	dayLines    func(d string) []string  // that day's raw "- HH:MM ..." lines
+	dates       func() []string           // days that have content (any order)
+	entries     func(d string) []dayEntry // that day's selectable entries, in file order
 	// add writes to the selected day and returns the date it actually wrote to,
 	// which is not always d — see importantBrowser. nil disables 'a'.
 	add func(d, text string) string
-	summaries   func() map[string]string // nil: no per-day summary line
-	fallback    func()                   // plain output when raw mode fails
-	empty       string                   // message when there are no days
+	// edit rewrites entry i's text; del removes it. Both nil ⇒ a read-only
+	// content pane (shell). i indexes into entries(d).
+	edit      func(d string, i int, text string)
+	del       func(d string, i int)
+	summaries func() map[string]string // nil: no per-day summary line
+	fallback  func()                   // plain output when raw mode fails
+	empty     string                   // message when there are no days
 }
 
 // datesWithFile lists the date dirs that contain the given file.
@@ -53,10 +65,48 @@ func journalBrowser() browserCfg {
 	return browserCfg{
 		label: "journal", icon: iJournal,
 		dates: datesWithFile("journal.md"),
-		dayLines: func(d string) []string {
-			return readLines(journalPath(d))
+		entries: func(d string) []dayEntry {
+			var out []dayEntry
+			for _, l := range readLines(journalPath(d)) {
+				if m := entryRe.FindStringSubmatch(l); m != nil {
+					out = append(out, dayEntry{m[1], entryRe.ReplaceAllString(l, "")})
+				}
+			}
+			return out
 		},
 		add: func(d, text string) string { addJournal(d, clock(), text); return d },
+		edit: func(d string, i int, text string) {
+			path := journalPath(d)
+			lines := readLines(path)
+			n := 0
+			for li, l := range lines {
+				m := entryRe.FindStringSubmatch(l)
+				if m == nil {
+					continue
+				}
+				if n == i {
+					lines[li] = "- " + m[1] + " — " + text
+					writeLines(path, lines)
+					return
+				}
+				n++
+			}
+		},
+		del: func(d string, i int) {
+			path := journalPath(d)
+			lines := readLines(path)
+			n := 0
+			for li, l := range lines {
+				if !entryRe.MatchString(l) {
+					continue
+				}
+				if n == i {
+					writeLines(path, append(lines[:li], lines[li+1:]...))
+					return
+				}
+				n++
+			}
+		},
 		summaries: func() map[string]string {
 			m := map[string]string{}
 			for _, l := range readLines(datecachePath()) {
@@ -75,8 +125,14 @@ func shellBrowser() browserCfg {
 	return browserCfg{
 		label: "shell", icon: iCursor,
 		dates: datesWithFile("shell.md"),
-		dayLines: func(d string) []string {
-			return readLines(filepath.Join(notieDir(), d, "shell.md"))
+		entries: func(d string) []dayEntry {
+			var out []dayEntry
+			for _, l := range readLines(filepath.Join(notieDir(), d, "shell.md")) {
+				if m := browserEntryRe.FindStringSubmatch(l); m != nil {
+					out = append(out, dayEntry{m[1], m[2]})
+				}
+			}
+			return out
 		},
 		fallback: func() { cmdShowShell("") },
 		empty:    "no shell history yet — run some commands in a terminal",
@@ -86,6 +142,21 @@ func shellBrowser() browserCfg {
 // importantBrowser groups important.md's dated lines into per-day views.
 func importantBrowser() browserCfg {
 	path := filepath.Join(notieDir(), "important.md")
+	// nth walks important.md's lines for day d, calling fn with the file index
+	// and match of the i-th entry, then returns.
+	nth := func(d string, i int, fn func(li int, m []string, lines []string)) {
+		lines := readLines(path)
+		n := 0
+		for li, l := range lines {
+			if m := noteLineRe.FindStringSubmatch(l); m != nil && m[1] == d {
+				if n == i {
+					fn(li, m, lines)
+					return
+				}
+				n++
+			}
+		}
+	}
 	return browserCfg{
 		label: "important", icon: iStar,
 		dates: func() []string {
@@ -99,11 +170,11 @@ func importantBrowser() browserCfg {
 			}
 			return out
 		},
-		dayLines: func(d string) []string {
-			var out []string
+		entries: func(d string) []dayEntry {
+			var out []dayEntry
 			for _, l := range readLines(path) {
 				if m := noteLineRe.FindStringSubmatch(l); m != nil && m[1] == d {
-					out = append(out, "- "+m[2]+" — "+m[3])
+					out = append(out, dayEntry{m[2], m[3]})
 				}
 			}
 			return out
@@ -114,25 +185,50 @@ func importantBrowser() browserCfg {
 			appendLine(path, "Important", fmt.Sprintf("- %s %s — %s", today(), clock(), text))
 			return today()
 		},
+		edit: func(d string, i int, text string) {
+			nth(d, i, func(li int, m, lines []string) {
+				lines[li] = "- " + m[1] + " " + m[2] + " — " + text
+				writeLines(path, lines)
+			})
+		},
+		del: func(d string, i int) {
+			nth(d, i, func(li int, _, lines []string) {
+				writeLines(path, append(lines[:li], lines[li+1:]...))
+			})
+		},
 		fallback: func() { cmdShow("important") },
 		empty:    "nothing important yet — press a to add",
 	}
 }
 
+// contentRow is one rendered line of the content pane; entry is the index of
+// the dayEntry it belongs to, or -1 for the header, summary and blank rows.
+type contentRow struct {
+	text  string
+	entry int
+}
+
 type browserTUI struct {
 	cfg        browserCfg
-	dates      []string // newest first
+	dates      []string   // newest first
+	entries    []dayEntry // the selected day's entries (loaded each render)
 	summaries  map[string]string
-	cursor     int
+	focus      byte // 0: dates sidebar · 1: content
+	cursor     int  // selected date
+	entryCur   int  // selected entry in the content pane
 	sideOff    int
 	contentOff int
 	pending    byte
-	input      *string
-	inputCh    byte // 'a', '/' or ':'
+	in         *lineInput
 	search     string
 	searchMode byte // 0: dates+content ('/') · 'd': dates (:ff) · 'c': content (:fg)
 	status     string
 	quit       bool
+}
+
+// selectDate moves to date i and resets the content pane to its top.
+func (t *browserTUI) selectDate(i int) {
+	t.cursor, t.entryCur, t.contentOff = i, 0, 0
 }
 
 // addTarget is the day 'a' writes to: whichever date is selected, falling back
@@ -157,44 +253,55 @@ func (t *browserTUI) reload() {
 	if t.cfg.summaries != nil {
 		t.summaries = t.cfg.summaries()
 	}
+	t.loadDay()
+}
+
+// loadDay refreshes the selected day's entries and clamps the entry cursor;
+// focus falls back to the sidebar when the day has nothing to select.
+func (t *browserTUI) loadDay() {
+	t.entries = nil
+	if t.cursor >= 0 && t.cursor < len(t.dates) {
+		t.entries = t.cfg.entries(t.dates[t.cursor])
+	}
+	if t.entryCur >= len(t.entries) {
+		t.entryCur = len(t.entries) - 1
+	}
+	if t.entryCur < 0 {
+		t.entryCur = 0
+	}
+	if len(t.entries) == 0 {
+		t.focus = 0
+	}
 }
 
 // content builds the right pane for the selected date.
-func (t *browserTUI) content(width int) []string {
+func (t *browserTUI) content(width int) []contentRow {
 	if len(t.dates) == 0 {
 		return nil
 	}
+	var out []contentRow
+	push := func(s string) { out = append(out, contentRow{s, -1}) }
 	d := t.dates[t.cursor]
-	var out []string
 	if day, err := time.Parse("2006-01-02", d); err == nil {
-		out = append(out, cBold+cAccent+day.Format("Monday, 02 January 2006")+cReset)
+		push(cBold + cAccent + day.Format("Monday, 02 January 2006") + cReset)
 	} else {
-		out = append(out, cBold+cAccent+d+cReset)
+		push(cBold + cAccent + d + cReset)
 	}
 	if s, ok := t.summaries[d]; ok {
 		for _, w := range wrapRunes(s, width) {
-			out = append(out, cGrey+cItalic+highlight(w, t.search, cGrey+cItalic)+cReset)
+			push(cGrey + cItalic + highlight(w, t.search, cGrey+cItalic) + cReset)
 		}
 	}
-	out = append(out, "")
-	for _, l := range t.cfg.dayLines(d) {
-		if strings.HasPrefix(l, "# ") || strings.TrimSpace(l) == "" {
-			continue
-		}
-		if m := browserEntryRe.FindStringSubmatch(l); m != nil {
-			ts, text := m[1], strings.TrimPrefix(m[2], "— ")
-			indent := runeLen(ts) + 3
-			for i, w := range wrapRunes(text, max(4, width-indent)) {
-				if i == 0 {
-					out = append(out, cAccent+iBullet+cReset+" "+cGrey+ts+cReset+" "+
-						highlight(w, t.search, ""))
-				} else {
-					out = append(out, strings.Repeat(" ", indent)+highlight(w, t.search, ""))
-				}
-			}
-		} else {
-			for _, w := range wrapRunes(l, width) {
-				out = append(out, cGrey+highlight(w, t.search, cGrey)+cReset)
+	push("")
+	for ei, e := range t.entries {
+		indent := runeLen(e.ts) + 3
+		for i, w := range wrapRunes(e.text, max(4, width-indent)) {
+			if i == 0 {
+				out = append(out, contentRow{
+					cAccent + iBullet + cReset + " " + cGrey + e.ts + cReset + " " +
+						highlight(w, t.search, ""), ei})
+			} else {
+				out = append(out, contentRow{strings.Repeat(" ", indent) + highlight(w, t.search, ""), ei})
 			}
 		}
 	}
@@ -213,6 +320,7 @@ func (t *browserTUI) searchLabel() string {
 }
 
 func (t *browserTUI) render() {
+	t.loadDay()
 	var b strings.Builder
 	b.WriteString("\x1b[H\x1b[2J")
 	rows, cols := termSize()
@@ -227,10 +335,33 @@ func (t *browserTUI) render() {
 		t.sideOff = t.cursor - avail + 1
 	}
 	paneW := max(10, cols-sideW-2)
-	content := t.content(paneW)
-	maxOff := max(0, len(content)-avail)
-	if t.contentOff > maxOff {
+	content := t.content(paneW - 2) // leave 2 cols for the focus gutter
+
+	// keep the focused entry in view
+	if t.focus == 1 {
+		first, last := -1, -1
+		for i, r := range content {
+			if r.entry == t.entryCur {
+				if first < 0 {
+					first = i
+				}
+				last = i
+			}
+		}
+		if first >= 0 {
+			if first < t.contentOff {
+				t.contentOff = first
+			}
+			if last >= t.contentOff+avail {
+				t.contentOff = last - avail + 1
+			}
+		}
+	}
+	if maxOff := max(0, len(content)-avail); t.contentOff > maxOff {
 		t.contentOff = maxOff
+	}
+	if t.contentOff < 0 {
+		t.contentOff = 0
 	}
 
 	if len(t.dates) == 0 {
@@ -245,43 +376,61 @@ func (t *browserTUI) render() {
 			if d == today() {
 				mark = cGreen + iBullet + cReset
 			}
-			if di == t.cursor {
+			switch {
+			case di == t.cursor && t.focus == 0:
 				cell := " " + iDate + " " + d + " "
 				left = cCursor + cAccent + cBold + mark + strings.ReplaceAll(cell, cReset, cReset+cCursor) + cReset
-			} else {
+			case di == t.cursor:
+				left = mark + cAccent + " " + iDate + " " + d + " " + cReset
+			default:
 				left = mark + "   " + cGrey + d + cReset + " "
 			}
 		} else {
 			left = strings.Repeat(" ", sideW)
 		}
-		// content cell
-		right := ""
+		// content cell, with a focus gutter marking the selected entry
+		right, gutter := "", "  "
 		if ci := t.contentOff + i; ci < len(content) {
-			right = content[ci]
+			right = content[ci].text
+			if t.focus == 1 && content[ci].entry >= 0 && content[ci].entry == t.entryCur {
+				gutter = cAccent + iBar + " " + cReset
+			}
 		}
-		b.WriteString(left + cGrey + "│" + cReset + " " + right + "\r\n")
+		b.WriteString(left + cGrey + "│" + cReset + " " + gutter + right + "\r\n")
 	}
 
 	b.WriteString(fmt.Sprintf("\x1b[%d;1H", rows))
 	switch {
-	case t.input != nil && t.inputCh == 'a':
-		b.WriteString(cGreen + " + " + t.addTarget() + ": " + cReset + *t.input + cCursor + " " + cReset)
-	case t.input != nil && t.inputCh == '/':
-		b.WriteString(cAccent + " /" + cReset + *t.input + cCursor + " " + cReset)
-	case t.input != nil && t.inputCh == ':':
-		b.WriteString(cYellow + " :" + cReset + *t.input + cCursor + " " + cReset)
+	case t.in != nil && t.in.kind == 'a':
+		b.WriteString(inputBar(cGreen+" + "+t.addTarget()+": "+cReset, t.in.buf))
+	case t.in != nil && t.in.kind == 'e':
+		b.WriteString(inputBar(cYellow+" "+iEdit+" "+cReset, t.in.buf))
+	case t.in != nil && t.in.kind == '/':
+		b.WriteString(inputBar(cAccent+" /"+cReset, t.in.buf))
+	case t.in != nil && t.in.kind == ':':
+		b.WriteString(inputBar(cYellow+" :"+cReset, t.in.buf))
+	case t.pending == 'd':
+		b.WriteString(cRed + " d… delete entry? press d again" + cReset)
 	case t.status != "":
 		b.WriteString(" " + t.status)
 	case t.search != "":
 		b.WriteString(cAccent + " " + t.searchLabel() + t.search + cReset +
 			cGrey + "  n/N matching day · esc clear" + cReset)
-	default:
-		help := " j/k days · J/K scroll · / search · :ff date · :fg grep"
+	case t.focus == 1:
+		help := " ↑↓ entry · ← dates"
+		if t.cfg.edit != nil {
+			help += " · e edit · dd del"
+		}
 		if t.cfg.add != nil {
 			help += " · a add"
 		}
-		help += " · t today · q/:q quit"
-		b.WriteString(cGrey + help + cReset)
+		b.WriteString(cGrey + help + " · yy copy · / search · q quit" + cReset)
+	default:
+		help := " ↑↓ date · → open"
+		if t.cfg.add != nil {
+			help += " · a add"
+		}
+		b.WriteString(cGrey + help + " · yy copy · / search · t today · q quit" + cReset)
 	}
 	os.Stdout.WriteString(b.String())
 }
@@ -295,25 +444,44 @@ func (t *browserTUI) dayMatches(d, q string) bool {
 	if t.searchMode == 'd' {
 		return false
 	}
-	for _, l := range t.cfg.dayLines(d) {
-		if containsFold(l, q) {
+	for _, e := range t.cfg.entries(d) {
+		if containsFold(e.ts+" "+e.text, q) {
 			return true
 		}
 	}
 	return false
 }
 
+// doDelete removes the focused content entry, if the source allows it.
+func (t *browserTUI) doDelete() {
+	if t.focus == 1 && t.cfg.del != nil && t.entryCur < len(t.entries) {
+		t.cfg.del(t.dates[t.cursor], t.entryCur)
+		t.reload()
+		t.status = cRed + "deleted" + cReset
+	}
+}
+
+// yank copies the focused row: the entry text in the content pane, or the date
+// in the sidebar.
+func (t *browserTUI) yank() {
+	var s string
+	if t.focus == 1 && t.entryCur < len(t.entries) {
+		s = t.entries[t.entryCur].text
+	} else if t.cursor < len(t.dates) {
+		s = t.dates[t.cursor]
+	}
+	yank(&t.status, s)
+}
+
 func (t *browserTUI) findNext(dir int) {
 	if t.search == "" || len(t.dates) == 0 {
 		return
 	}
-	n := len(t.dates)
-	for step := 1; step <= n; step++ {
-		di := ((t.cursor+dir*step)%n + n) % n
-		if t.dayMatches(t.dates[di], t.search) {
-			t.cursor, t.contentOff = di, 0
-			return
-		}
+	if i, ok := cycle(len(t.dates), t.cursor, dir, func(i int) bool {
+		return t.dayMatches(t.dates[i], t.search)
+	}); ok {
+		t.selectDate(i)
+		return
 	}
 	if t.dayMatches(t.dates[t.cursor], t.search) {
 		return // only the current day matches
@@ -347,155 +515,195 @@ func (t *browserTUI) runCommand(val string) {
 
 // liveFind jumps to the first matching date while a ":ff pat" is being typed.
 func (t *browserTUI) liveFind() {
-	if !strings.HasPrefix(*t.input, "ff ") {
+	if t.in == nil || !strings.HasPrefix(t.in.buf, "ff ") {
 		return
 	}
-	pat := strings.TrimSpace((*t.input)[3:])
+	pat := strings.TrimSpace(t.in.buf[3:])
 	if pat == "" {
 		return
 	}
 	for i, d := range t.dates {
 		if containsFold(d, pat) {
-			t.cursor, t.contentOff = i, 0
+			t.selectDate(i)
 			return
 		}
 	}
 }
 
-func runBrowser(cfg browserCfg) {
-	old, err := enterRaw()
-	if err != nil {
-		cfg.fallback()
-		return
-	}
-	os.Stdout.WriteString("\x1b[?1049h\x1b[?25l")
-	defer func() {
-		os.Stdout.WriteString("\x1b[?1049l\x1b[?25h")
-		restoreTerm(old)
-	}()
-
-	t := &browserTUI{cfg: cfg}
-	t.reload()
-	r := bufio.NewReader(os.Stdin)
-	for {
-		t.render()
-		c, err := readKey(r)
-		if err != nil {
+// submit applies a finished line-editor entry.
+func (t *browserTUI) submit(kind byte, val string) {
+	switch kind {
+	case 'a':
+		if val == "" {
 			return
 		}
+		wrote := t.cfg.add(t.addTarget(), val) // may differ from the selected day
+		t.reload()
+		for i, d := range t.dates {
+			if d == wrote {
+				t.selectDate(i)
+			}
+		}
+		t.status = cGreen + "added to " + wrote + cReset
+		if warnStale() && t.cfg.summaries != nil && cachedDate(wrote) {
+			t.status += cGrey + " · stale summary — notie cache " + wrote + cReset
+		}
+	case 'e':
+		if val == "" || t.cfg.edit == nil || t.entryCur >= len(t.entries) {
+			return
+		}
+		t.cfg.edit(t.dates[t.cursor], t.entryCur, val)
+		t.reload()
+		t.status = cGreen + "updated" + cReset
+	case '/':
+		t.search, t.searchMode = val, 0
+		if val != "" && len(t.dates) > 0 && !t.dayMatches(t.dates[t.cursor], val) {
+			t.findNext(1)
+		}
+	case ':':
+		t.runCommand(val)
+	}
+}
 
-		if t.input != nil {
-			switch {
-			case c == 13 || c == 10:
-				val := strings.TrimSpace(*t.input)
-				kind := t.inputCh
-				t.input = nil
-				switch {
-				case kind == 'a' && val != "":
-					// where it landed, which may differ from the selected day
-					wrote := t.cfg.add(t.addTarget(), val)
-					t.reload()
-					for i, d := range t.dates {
-						if d == wrote {
-							t.cursor, t.contentOff = i, 0
-						}
+func runBrowser(cfg browserCfg) {
+	t := &browserTUI{cfg: cfg}
+	t.reload()
+	runScreen(cfg.fallback, func(r *bufio.Reader) {
+		for {
+			t.render()
+			c, err := readKey(r)
+			if err != nil {
+				return
+			}
+
+			if t.in != nil {
+				switch t.in.key(c) {
+				case "":
+					if t.in.kind == ':' {
+						t.liveFind()
 					}
-					t.status = cGreen + "added to " + wrote + cReset
-					if t.cfg.summaries != nil && cachedDate(wrote) {
-						t.status += cGrey + " · stale summary — notie cache " + wrote + cReset
-					}
-				case kind == '/':
-					t.search, t.searchMode = val, 0
-					if val != "" && len(t.dates) > 0 && !t.dayMatches(t.dates[t.cursor], val) {
-						t.findNext(1)
-					}
-				case kind == ':':
-					t.runCommand(val)
+				case "cancel":
+					t.in = nil
+				case "submit":
+					kind, val := t.in.kind, strings.TrimSpace(t.in.buf)
+					t.in = nil
+					t.submit(kind, val)
 					if t.quit {
 						return
 					}
 				}
-			case c == 27:
-				t.input = nil
-			case c == 127 || c == 8:
-				if len(*t.input) > 0 {
-					*t.input = (*t.input)[:len(*t.input)-1]
-					if t.inputCh == ':' {
-						t.liveFind()
+				continue
+			}
+
+			t.status = ""
+			if t.pending == 'g' {
+				t.pending = 0
+				if c == 'g' {
+					if t.focus == 0 {
+						t.selectDate(0)
+					} else {
+						t.entryCur, t.contentOff = 0, 0
 					}
 				}
-			case c >= 32 && c < 127:
-				*t.input += string(c)
-				if t.inputCh == ':' {
-					t.liveFind()
+				continue
+			}
+			if t.pending == 'd' {
+				t.pending = 0
+				if c == 'd' {
+					t.doDelete()
 				}
+				continue
 			}
-			continue
-		}
-
-		t.status = ""
-		if t.pending == 'g' {
-			t.pending = 0
-			if c == 'g' {
-				t.cursor, t.contentOff = 0, 0
-			}
-			continue
-		}
-
-		switch c {
-		case 'q', 3:
-			return
-		case 27:
-			t.search, t.searchMode = "", 0
-		case 'j':
-			if t.cursor < len(t.dates)-1 {
-				t.cursor++
-				t.contentOff = 0
-			}
-		case 'k':
-			if t.cursor > 0 {
-				t.cursor--
-				t.contentOff = 0
-			}
-		case 'g':
-			t.pending = 'g'
-		case 'G':
-			if len(t.dates) > 0 {
-				t.cursor, t.contentOff = len(t.dates)-1, 0
-			}
-		case 'J':
-			t.contentOff++ // clamped in render
-		case 'K':
-			if t.contentOff > 0 {
-				t.contentOff--
-			}
-		case 4: // ctrl-d / PgDn
-			rows, _ := termSize()
-			t.contentOff += max(1, (rows-2)/2)
-		case 21: // ctrl-u / PgUp
-			rows, _ := termSize()
-			t.contentOff = max(0, t.contentOff-max(1, (rows-2)/2))
-		case 't':
-			for i, d := range t.dates {
-				if d == today() {
-					t.cursor, t.contentOff = i, 0
+			if t.pending == 'y' {
+				t.pending = 0
+				if c == 'y' {
+					t.yank()
 				}
+				continue
 			}
-		case 'a', 'o':
-			if t.cfg.add != nil {
-				s := ""
-				t.input, t.inputCh = &s, 'a'
+
+			switch c {
+			case 'q', 3:
+				return
+			case 27:
+				t.search, t.searchMode = "", 0
+			case 'h':
+				t.focus = 0
+			case 'l':
+				if len(t.entries) > 0 {
+					t.focus = 1
+				}
+			case 'j':
+				if t.focus == 0 {
+					if t.cursor < len(t.dates)-1 {
+						t.selectDate(t.cursor + 1)
+					}
+				} else if t.entryCur < len(t.entries)-1 {
+					t.entryCur++
+				}
+			case 'k':
+				if t.focus == 0 {
+					if t.cursor > 0 {
+						t.selectDate(t.cursor - 1)
+					}
+				} else if t.entryCur > 0 {
+					t.entryCur--
+				}
+			case 'g':
+				t.pending = 'g'
+			case 'G':
+				if t.focus == 0 {
+					if len(t.dates) > 0 {
+						t.selectDate(len(t.dates) - 1)
+					}
+				} else {
+					t.entryCur = len(t.entries) - 1
+				}
+			case 'J':
+				t.contentOff++ // clamped in render
+			case 'K':
+				if t.contentOff > 0 {
+					t.contentOff--
+				}
+			case 4: // ctrl-d / PgDn
+				rows, _ := termSize()
+				t.contentOff += max(1, (rows-2)/2)
+			case 21: // ctrl-u / PgUp
+				rows, _ := termSize()
+				t.contentOff = max(0, t.contentOff-max(1, (rows-2)/2))
+			case 't':
+				for i, d := range t.dates {
+					if d == today() {
+						t.selectDate(i)
+					}
+				}
+			case 'a', 'o':
+				if t.cfg.add != nil {
+					t.in = &lineInput{kind: 'a'}
+				}
+			case 'e':
+				if t.focus == 1 && t.cfg.edit != nil && t.entryCur < len(t.entries) {
+					t.in = &lineInput{kind: 'e', buf: t.entries[t.entryCur].text}
+				}
+			case 'd':
+				if t.focus == 1 && t.cfg.del != nil {
+					if confirmDelete() {
+						t.pending = 'd'
+					} else {
+						t.doDelete()
+					}
+				}
+			case 'y':
+				t.pending = 'y'
+			case '/':
+				t.in = &lineInput{kind: '/'}
+			case ':':
+				t.in = &lineInput{kind: ':'}
+			case 'n':
+				t.findNext(1)
+			case 'N':
+				t.findNext(-1)
 			}
-		case '/':
-			s := ""
-			t.input, t.inputCh = &s, '/'
-		case ':':
-			s := ""
-			t.input, t.inputCh = &s, ':'
-		case 'n':
-			t.findNext(1)
-		case 'N':
-			t.findNext(-1)
 		}
-	}
+	})
 }

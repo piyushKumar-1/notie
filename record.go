@@ -44,6 +44,9 @@ func whisperModel() string {
 	if m := os.Getenv("NOTIE_WHISPER_MODEL"); m != "" {
 		return m
 	}
+	if m := configVal("voice.whisper_model", ""); m != "" {
+		return m
+	}
 	home, _ := os.UserHomeDir()
 	dir := filepath.Join(home, ".cache", "whisper")
 	names := []string{"ggml-large-v3-turbo.bin", "ggml-medium.bin", "ggml-small.bin", "ggml-base.bin"}
@@ -55,12 +58,19 @@ func whisperModel() string {
 	return filepath.Join(dir, names[len(names)-1])
 }
 
-// transcribe turns a wav file into one line of text, via the hear CLI
-// (Apple Speech) when installed, else whisper-cli with a local model.
+// transcribe turns a wav file into one line of text. The voice.transcriber
+// setting picks the engine: "hear" (Apple Speech), "whisper" (whisper-cli with
+// a local model), or "auto" (hear when present, else whisper).
 func transcribe(wav string) string {
-	if bin, err := exec.LookPath("hear"); err == nil {
-		if out, err := exec.Command(bin, "-i", wav).Output(); err == nil {
-			return strings.Join(strings.Fields(string(out)), " ")
+	pref := configVal("voice.transcriber", "auto")
+	if pref != "whisper" {
+		if bin, err := exec.LookPath("hear"); err == nil {
+			if out, err := exec.Command(bin, "-i", wav).Output(); err == nil {
+				return strings.Join(strings.Fields(string(out)), " ")
+			}
+		}
+		if pref == "hear" {
+			fatal("voice.transcriber is 'hear' but the hear CLI is missing or failed — brew install hear")
 		}
 	}
 	bin, err := exec.LookPath("whisper-cli")
@@ -116,10 +126,10 @@ func cmdRecord(target string) {
 	case "task":
 		// priority is optional — Enter (or anything unrecognized) takes the default
 		in := bufio.NewReader(os.Stdin)
-		fmt.Print(cGrey + "priority [0 high · 1 normal · 2 low, default " + defaultPri + "]: " + cReset)
+		fmt.Print(cGrey + "priority [0 high · 1 normal · 2 low, default " + defaultPri() + "]: " + cReset)
 		p, _ := in.ReadString('\n')
 		if p = strings.TrimSpace(p); p != "0" && p != "1" && p != "2" {
-			p = defaultPri
+			p = defaultPri()
 		}
 		cmdTask([]string{p, text})
 	}

@@ -24,8 +24,7 @@ type notesTUI struct {
 	cursor  int
 	offset  int
 	pending byte
-	input   *string
-	inputCh byte
+	in      *lineInput
 	search  string
 	status  string
 }
@@ -96,12 +95,14 @@ func (t *notesTUI) render() {
 
 	b.WriteString(fmt.Sprintf("\x1b[%d;1H", rows))
 	switch {
-	case t.input != nil && t.inputCh == 'a':
-		b.WriteString(t.cfg.iconColor + " + " + cReset + *t.input + cCursor + " " + cReset)
-	case t.input != nil && t.inputCh == '/':
-		b.WriteString(cAccent + " /" + cReset + *t.input + cCursor + " " + cReset)
-	case t.input != nil && t.inputCh == ':':
-		b.WriteString(cYellow + " :" + cReset + *t.input + cCursor + " " + cReset)
+	case t.in != nil && t.in.kind == 'a':
+		b.WriteString(inputBar(t.cfg.iconColor+" + "+cReset, t.in.buf))
+	case t.in != nil && t.in.kind == 'e':
+		b.WriteString(inputBar(cYellow+" "+iEdit+" "+cReset, t.in.buf))
+	case t.in != nil && t.in.kind == '/':
+		b.WriteString(inputBar(cAccent+" /"+cReset, t.in.buf))
+	case t.in != nil && t.in.kind == ':':
+		b.WriteString(inputBar(cYellow+" :"+cReset, t.in.buf))
 	case t.pending == 'd':
 		b.WriteString(cRed + " d… delete? press d again" + cReset)
 	case t.status != "":
@@ -109,7 +110,7 @@ func (t *notesTUI) render() {
 	case t.search != "":
 		b.WriteString(cAccent + " /" + t.search + cReset + cGrey + "  n/N next/prev · esc clear" + cReset)
 	default:
-		b.WriteString(cGrey + " j/k move · a add · dd delete · / search · :fg grep · q/:q quit" + cReset)
+		b.WriteString(cGrey + " j/k move · a add · e edit · dd del · yy copy · / search · q/:q quit" + cReset)
 	}
 	os.Stdout.WriteString(b.String())
 }
@@ -118,132 +119,170 @@ func (t *notesTUI) findNext(dir int) {
 	if t.search == "" || len(t.notes) == 0 {
 		return
 	}
-	n := len(t.notes)
-	for step := 1; step <= n; step++ {
-		vi := ((t.cursor+dir*step)%n + n) % n
-		if containsFold(t.lines[t.notes[vi]], t.search) {
-			t.cursor = vi
-			return
-		}
+	if i, ok := cycle(len(t.notes), t.cursor, dir, func(i int) bool {
+		return containsFold(t.lines[t.notes[i]], t.search)
+	}); ok {
+		t.cursor = i
+		return
 	}
 	t.status = cGrey + "no match for /" + t.search + cReset
 }
 
-func runNotesTUI(cfg notesCfg) {
-	old, err := enterRaw()
-	if err != nil {
-		printFile(notieDir()+"/"+cfg.file, "empty")
+// deleteNote removes the selected note.
+func (t *notesTUI) deleteNote() {
+	if len(t.notes) == 0 {
 		return
 	}
-	os.Stdout.WriteString("\x1b[?1049h\x1b[?25l")
-	defer func() {
-		os.Stdout.WriteString("\x1b[?1049l\x1b[?25h")
-		restoreTerm(old)
-	}()
+	i := t.notes[t.cursor]
+	t.lines = append(t.lines[:i], t.lines[i+1:]...)
+	writeLines(t.path(), t.lines)
+	t.reload()
+	t.status = cRed + "deleted" + cReset
+}
 
+// yank copies the selected note's text to the clipboard.
+func (t *notesTUI) yank() {
+	if len(t.notes) == 0 {
+		return
+	}
+	l := t.lines[t.notes[t.cursor]]
+	if m := noteLineRe.FindStringSubmatch(l); m != nil {
+		l = m[3]
+	}
+	yank(&t.status, l)
+}
+
+// editNote rewrites the selected note's text, preserving its date and time.
+func (t *notesTUI) editNote(text string) {
+	if len(t.notes) == 0 || text == "" {
+		return
+	}
+	i := t.notes[t.cursor]
+	m := noteLineRe.FindStringSubmatch(t.lines[i])
+	if m == nil {
+		return
+	}
+	t.lines[i] = "- " + m[1] + " " + m[2] + " — " + text
+	writeLines(t.path(), t.lines)
+	t.reload()
+	t.status = cGreen + "updated" + cReset
+}
+
+func runNotesTUI(cfg notesCfg) {
 	t := &notesTUI{cfg: cfg}
 	t.reload()
-	r := bufio.NewReader(os.Stdin)
-	for {
-		t.render()
-		c, err := readKey(r)
-		if err != nil {
-			return
-		}
+	runScreen(func() { printFile(notieDir()+"/"+cfg.file, "empty") }, func(r *bufio.Reader) {
+		for {
+			t.render()
+			c, err := readKey(r)
+			if err != nil {
+				return
+			}
 
-		if t.input != nil {
-			switch {
-			case c == 13 || c == 10:
-				val := strings.TrimSpace(*t.input)
-				kind := t.inputCh
-				t.input = nil
-				if kind == 'a' && val != "" {
-					appendLine(t.path(), t.cfg.header,
-						fmt.Sprintf("- %s %s — %s", today(), clock(), val))
-					t.reload()
-					t.cursor = len(t.notes) - 1
-					t.status = cGreen + "added" + cReset
-				} else if kind == '/' {
-					t.search = val
-					t.findNext(1)
-				} else if kind == ':' {
-					switch cmd, arg := splitCmd(val); cmd {
-					case "q", "quit":
-						return
-					case "ff", "fg":
-						t.search = arg
+			if t.in != nil {
+				switch t.in.key(c) {
+				case "cancel":
+					t.in = nil
+				case "submit":
+					kind, val := t.in.kind, strings.TrimSpace(t.in.buf)
+					t.in = nil
+					switch kind {
+					case 'a':
+						if val != "" {
+							appendLine(t.path(), t.cfg.header,
+								fmt.Sprintf("- %s %s — %s", today(), clock(), val))
+							t.reload()
+							t.cursor = len(t.notes) - 1
+							t.status = cGreen + "added" + cReset
+						}
+					case 'e':
+						t.editNote(val)
+					case '/':
+						t.search = val
 						t.findNext(1)
-					case "":
-					default:
-						t.status = cRed + "unknown command :" + cmd + cReset
+					case ':':
+						switch cmd, arg := splitCmd(val); cmd {
+						case "q", "quit":
+							return
+						case "ff", "fg":
+							t.search = arg
+							t.findNext(1)
+						case "":
+						default:
+							t.status = cRed + "unknown command :" + cmd + cReset
+						}
 					}
 				}
-			case c == 27:
-				t.input = nil
-			case c == 127 || c == 8:
-				if len(*t.input) > 0 {
-					*t.input = (*t.input)[:len(*t.input)-1]
+				continue
+			}
+
+			t.status = ""
+			if t.pending == 'd' {
+				t.pending = 0
+				if c == 'd' {
+					t.deleteNote()
 				}
-			case c >= 32 && c < 127:
-				*t.input += string(c)
+				continue
 			}
-			continue
-		}
+			if t.pending == 'g' {
+				t.pending = 0
+				if c == 'g' {
+					t.cursor = 0
+				}
+				continue
+			}
+			if t.pending == 'y' {
+				t.pending = 0
+				if c == 'y' {
+					t.yank()
+				}
+				continue
+			}
 
-		t.status = ""
-		if t.pending == 'd' {
-			t.pending = 0
-			if c == 'd' && len(t.notes) > 0 {
-				i := t.notes[t.cursor]
-				t.lines = append(t.lines[:i], t.lines[i+1:]...)
-				writeLines(t.path(), t.lines)
-				t.reload()
-				t.status = cRed + "deleted" + cReset
+			switch c {
+			case 'q', 3:
+				return
+			case 27:
+				t.search = ""
+			case 'j':
+				if t.cursor < len(t.notes)-1 {
+					t.cursor++
+				}
+			case 'k':
+				if t.cursor > 0 {
+					t.cursor--
+				}
+			case 'g':
+				t.pending = 'g'
+			case 'G':
+				if len(t.notes) > 0 {
+					t.cursor = len(t.notes) - 1
+				}
+			case 'd':
+				if confirmDelete() {
+					t.pending = 'd'
+				} else {
+					t.deleteNote()
+				}
+			case 'y':
+				t.pending = 'y'
+			case 'e':
+				if len(t.notes) > 0 {
+					if m := noteLineRe.FindStringSubmatch(t.lines[t.notes[t.cursor]]); m != nil {
+						t.in = &lineInput{kind: 'e', buf: m[3]}
+					}
+				}
+			case 'a', 'o':
+				t.in = &lineInput{kind: 'a'}
+			case '/':
+				t.in = &lineInput{kind: '/'}
+			case ':':
+				t.in = &lineInput{kind: ':'}
+			case 'n':
+				t.findNext(1)
+			case 'N':
+				t.findNext(-1)
 			}
-			continue
 		}
-		if t.pending == 'g' {
-			t.pending = 0
-			if c == 'g' {
-				t.cursor = 0
-			}
-			continue
-		}
-
-		switch c {
-		case 'q', 3:
-			return
-		case 27:
-			t.search = ""
-		case 'j':
-			if t.cursor < len(t.notes)-1 {
-				t.cursor++
-			}
-		case 'k':
-			if t.cursor > 0 {
-				t.cursor--
-			}
-		case 'g':
-			t.pending = 'g'
-		case 'G':
-			if len(t.notes) > 0 {
-				t.cursor = len(t.notes) - 1
-			}
-		case 'd':
-			t.pending = 'd'
-		case 'a', 'o':
-			s := ""
-			t.input, t.inputCh = &s, 'a'
-		case '/':
-			s := ""
-			t.input, t.inputCh = &s, '/'
-		case ':':
-			s := ""
-			t.input, t.inputCh = &s, ':'
-		case 'n':
-			t.findNext(1)
-		case 'N':
-			t.findNext(-1)
-		}
-	}
+	})
 }

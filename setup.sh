@@ -88,22 +88,42 @@ mkdir -p "$notie_dir"
 ok "notes live in $notie_dir"
 
 # 5. zsh shell-audit hook (optional)
+# The hook now lives in the binary (notie shell-init); ~/.zshrc just sources it,
+# so upgrades never need to touch the rc file. Under nix/home-manager ~/.zshrc is
+# a read-only store symlink, so we print instructions instead of editing it.
 echo "${bold}5. shell audit trail (optional)${reset}"
 zshrc="$HOME/.zshrc"
 hook_marker="# notie shell audit trail"
+hook_line='eval "$(command notie shell-init)"'
+managed=false
+if { [[ -L "$zshrc" ]] && [[ "$(readlink "$zshrc")" == /nix/store/* ]]; } || { [[ -e "$zshrc" && ! -w "$zshrc" ]]; }; then
+  managed=true
+fi
 if [[ -f "$zshrc" ]] && grep -qF "$hook_marker" "$zshrc"; then
   ok "zsh hook already installed in $zshrc"
-elif ask "Log every shell command to notie's audit trail (adds a preexec hook to ~/.zshrc)?"; then
-  cat >>"$zshrc" <<'EOF'
-
-# notie shell audit trail
-_notie_log() { command notie log "$1" >/dev/null 2>&1 }
-autoload -Uz add-zsh-hook
-add-zsh-hook preexec _notie_log
-EOF
+elif $managed; then
+  warn "~/.zshrc looks managed (nix/home-manager, read-only) — add this to your zsh
+      config (e.g. programs.zsh.initContent or initExtra):
+        $hook_line"
+elif ask "Log every shell command to notie's audit trail (adds a hook to ~/.zshrc)?"; then
+  printf '\n%s\n%s\n' "$hook_marker" "$hook_line" >>"$zshrc"
   ok "hook added to $zshrc — takes effect in new shells"
 else
-  warn "skipped — add it later, see README.md"
+  warn "skipped — add it later: $hook_line"
+fi
+
+# 5b. Claude Code shell capture (optional)
+# Claude Code runs Bash in a non-interactive shell, so the preexec hook never
+# fires for it. A PreToolUse hook in ~/.claude/settings.json captures those.
+echo "${bold}   Claude Code shell capture (optional)${reset}"
+if command -v claude >/dev/null 2>&1; then
+  if ask "Also log Claude Code's shell commands (adds a PreToolUse hook to ~/.claude/settings.json)?"; then
+    "$install_dir/notie" setup-claude-hook || warn "could not update ~/.claude/settings.json"
+  else
+    warn "skipped — enable later: notie setup-claude-hook"
+  fi
+else
+  warn "claude CLI not found — enable later with: notie setup-claude-hook"
 fi
 
 # 6. Claude Code skill (optional)

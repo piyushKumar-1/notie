@@ -19,9 +19,8 @@ type taskTUI struct {
 	showDone bool     // '.' toggles; done tasks hidden by default
 	cursor   int
 	offset   int
-	pending  byte    // 'd' or 'g' chord state
-	input    *string // non-nil while typing (add or search)
-	inputCh  byte    // 'a' or '/'
+	pending  byte       // 'd' or 'g' chord state
+	in       *lineInput // non-nil while typing (add, search, command or edit)
 	search   string
 	status   string
 }
@@ -159,15 +158,17 @@ func (t *taskTUI) render() {
 
 	b.WriteString(fmt.Sprintf("\x1b[%d;1H", rows))
 	switch {
-	case t.input != nil && t.inputCh == 'a':
-		b.WriteString(cYellow + " + " + cReset + *t.input + cCursor + " " + cReset)
-		if *t.input == "" {
-			b.WriteString(cGrey + " text — prefix 0|1|2 to set priority (default " + defaultPri + ")" + cReset)
+	case t.in != nil && t.in.kind == 'a':
+		b.WriteString(inputBar(cYellow+" + "+cReset, t.in.buf))
+		if t.in.buf == "" {
+			b.WriteString(cGrey + " text — prefix 0|1|2 to set priority (default " + defaultPri() + ")" + cReset)
 		}
-	case t.input != nil && t.inputCh == '/':
-		b.WriteString(cAccent + " /" + cReset + *t.input + cCursor + " " + cReset)
-	case t.input != nil && t.inputCh == ':':
-		b.WriteString(cYellow + " :" + cReset + *t.input + cCursor + " " + cReset)
+	case t.in != nil && t.in.kind == 'e':
+		b.WriteString(inputBar(cYellow+" "+iEdit+" "+cReset, t.in.buf))
+	case t.in != nil && t.in.kind == '/':
+		b.WriteString(inputBar(cAccent+" /"+cReset, t.in.buf))
+	case t.in != nil && t.in.kind == ':':
+		b.WriteString(inputBar(cYellow+" :"+cReset, t.in.buf))
 	case t.pending == 'd':
 		b.WriteString(cRed + " d… delete? press d again" + cReset)
 	case t.status != "":
@@ -175,7 +176,7 @@ func (t *taskTUI) render() {
 	case t.search != "":
 		b.WriteString(cAccent + " /" + t.search + cReset + cGrey + "  n/N next/prev · esc clear" + cReset)
 	default:
-		b.WriteString(cGrey + " j/k move · x toggle · 0-2 pri · . done · dd del · a add · / search · q quit" + cReset)
+		b.WriteString(cGrey + " j/k move · x toggle · 0-2 pri · . done · e edit · dd del · yy copy · a add · / search · q quit" + cReset)
 	}
 	os.Stdout.WriteString(b.String())
 }
@@ -216,7 +217,7 @@ func (t *taskTUI) addTask(in string) {
 	if in == "" {
 		return
 	}
-	pri, desc := defaultPri, in
+	pri, desc := defaultPri(), in
 	if len(in) > 1 && in[0] >= '0' && in[0] <= '2' && in[1] == ' ' {
 		pri, desc = in[:1], strings.TrimSpace(in[1:])
 	}
@@ -252,141 +253,181 @@ func (t *taskTUI) setPri(p byte) {
 	t.status = cGrey + "priority → !" + string(p) + cReset
 }
 
+// editDesc rewrites the selected task's description, preserving its id,
+// priority and (added/done) stamps.
+func (t *taskTUI) editDesc(text string) {
+	if len(t.tasks) == 0 || text == "" {
+		return
+	}
+	m := taskFullRe.FindStringSubmatch(t.lines[t.tasks[t.cursor]])
+	if m == nil {
+		return
+	}
+	line := fmt.Sprintf("- [%s] #%s", m[1], m[2])
+	if m[3] != "" {
+		line += " !" + m[3]
+	}
+	line += " " + text
+	if m[5] != "" {
+		line += " (added " + m[5] + ")"
+	}
+	if m[6] != "" {
+		line += " (done " + m[6] + ")"
+	}
+	t.lines[t.tasks[t.cursor]] = line
+	t.save()
+	t.cursorTo(m[2])
+	t.status = cGreen + "updated" + cReset
+}
+
+// yank copies the selected task's description to the clipboard.
+func (t *taskTUI) yank() {
+	if len(t.tasks) == 0 {
+		return
+	}
+	l := t.lines[t.tasks[t.cursor]]
+	if m := taskFullRe.FindStringSubmatch(l); m != nil {
+		l = m[4]
+	}
+	yank(&t.status, l)
+}
+
 // findNext moves the cursor to the next/prev task matching the search.
 func (t *taskTUI) findNext(dir int) {
 	if t.search == "" || len(t.tasks) == 0 {
 		return
 	}
-	n := len(t.tasks)
-	for step := 1; step <= n; step++ {
-		vi := ((t.cursor+dir*step)%n + n) % n
-		if containsFold(t.lines[t.tasks[vi]], t.search) {
-			t.cursor = vi
-			return
-		}
+	if i, ok := cycle(len(t.tasks), t.cursor, dir, func(i int) bool {
+		return containsFold(t.lines[t.tasks[i]], t.search)
+	}); ok {
+		t.cursor = i
+		return
 	}
 	t.status = cGrey + "no match for /" + t.search + cReset
 }
 
 func runTaskTUI() {
-	old, err := enterRaw()
-	if err != nil {
-		printTasks() // no terminal control available — plain fallback
-		return
-	}
-	os.Stdout.WriteString("\x1b[?1049h\x1b[?25l")
-	defer func() {
-		os.Stdout.WriteString("\x1b[?1049l\x1b[?25h")
-		restoreTerm(old)
-	}()
-
-	t := &taskTUI{}
+	t := &taskTUI{showDone: !collapseDone()}
 	t.reload()
-	r := bufio.NewReader(os.Stdin)
-	for {
-		t.render()
-		c, err := readKey(r)
-		if err != nil {
-			return
-		}
+	runScreen(printTasks, func(r *bufio.Reader) {
+		for {
+			t.render()
+			c, err := readKey(r)
+			if err != nil {
+				return
+			}
 
-		if t.input != nil {
-			switch {
-			case c == 13 || c == 10:
-				val := strings.TrimSpace(*t.input)
-				kind := t.inputCh
-				t.input = nil
-				if kind == 'a' {
-					t.addTask(val)
-				} else if kind == '/' {
-					t.search = val
-					t.findNext(1)
-				} else if kind == ':' {
-					switch cmd, arg := splitCmd(val); cmd {
-					case "q", "quit":
-						return
-					case "ff", "fg":
-						t.search = arg
+			if t.in != nil {
+				switch t.in.key(c) {
+				case "cancel":
+					t.in = nil
+				case "submit":
+					kind, val := t.in.kind, strings.TrimSpace(t.in.buf)
+					t.in = nil
+					switch kind {
+					case 'a':
+						t.addTask(val)
+					case 'e':
+						t.editDesc(val)
+					case '/':
+						t.search = val
 						t.findNext(1)
-					case "":
-					default:
-						t.status = cRed + "unknown command :" + cmd + cReset
+					case ':':
+						switch cmd, arg := splitCmd(val); cmd {
+						case "q", "quit":
+							return
+						case "ff", "fg":
+							t.search = arg
+							t.findNext(1)
+						case "":
+						default:
+							t.status = cRed + "unknown command :" + cmd + cReset
+						}
 					}
 				}
-			case c == 27:
-				t.input = nil
-			case c == 127 || c == 8:
-				if len(*t.input) > 0 {
-					*t.input = (*t.input)[:len(*t.input)-1]
+				continue
+			}
+
+			t.status = ""
+			if t.pending == 'd' {
+				t.pending = 0
+				if c == 'd' {
+					t.delete()
 				}
-			case c >= 32 && c < 127:
-				*t.input += string(c)
+				continue
 			}
-			continue
-		}
+			if t.pending == 'g' {
+				t.pending = 0
+				if c == 'g' {
+					t.cursor = 0
+				}
+				continue
+			}
+			if t.pending == 'y' {
+				t.pending = 0
+				if c == 'y' {
+					t.yank()
+				}
+				continue
+			}
 
-		t.status = ""
-		if t.pending == 'd' {
-			t.pending = 0
-			if c == 'd' {
-				t.delete()
+			switch c {
+			case 'q', 3:
+				return
+			case 27:
+				t.search = ""
+			case 'j':
+				if t.cursor < len(t.tasks)-1 {
+					t.cursor++
+				}
+			case 'k':
+				if t.cursor > 0 {
+					t.cursor--
+				}
+			case 'g':
+				t.pending = 'g'
+			case 'G':
+				if len(t.tasks) > 0 {
+					t.cursor = len(t.tasks) - 1
+				}
+			case 'x', ' ':
+				t.toggle()
+			case '0', '1', '2':
+				t.setPri(c)
+			case '.':
+				t.showDone = !t.showDone
+				t.reload()
+				if t.showDone {
+					t.status = cGrey + "showing done" + cReset
+				} else {
+					t.status = cGrey + "hiding done" + cReset
+				}
+			case 'd':
+				if confirmDelete() {
+					t.pending = 'd'
+				} else {
+					t.delete()
+				}
+			case 'y':
+				t.pending = 'y'
+			case 'e':
+				if len(t.tasks) > 0 {
+					m := taskFullRe.FindStringSubmatch(t.lines[t.tasks[t.cursor]])
+					if m != nil {
+						t.in = &lineInput{kind: 'e', buf: m[4]}
+					}
+				}
+			case 'a', 'o':
+				t.in = &lineInput{kind: 'a'}
+			case '/':
+				t.in = &lineInput{kind: '/'}
+			case ':':
+				t.in = &lineInput{kind: ':'}
+			case 'n':
+				t.findNext(1)
+			case 'N':
+				t.findNext(-1)
 			}
-			continue
 		}
-		if t.pending == 'g' {
-			t.pending = 0
-			if c == 'g' {
-				t.cursor = 0
-			}
-			continue
-		}
-
-		switch c {
-		case 'q', 3:
-			return
-		case 27:
-			t.search = ""
-		case 'j':
-			if t.cursor < len(t.tasks)-1 {
-				t.cursor++
-			}
-		case 'k':
-			if t.cursor > 0 {
-				t.cursor--
-			}
-		case 'g':
-			t.pending = 'g'
-		case 'G':
-			if len(t.tasks) > 0 {
-				t.cursor = len(t.tasks) - 1
-			}
-		case 'x', ' ':
-			t.toggle()
-		case '0', '1', '2':
-			t.setPri(c)
-		case '.':
-			t.showDone = !t.showDone
-			t.reload()
-			if t.showDone {
-				t.status = cGrey + "showing done" + cReset
-			} else {
-				t.status = cGrey + "hiding done" + cReset
-			}
-		case 'd':
-			t.pending = 'd'
-		case 'a', 'o':
-			s := ""
-			t.input, t.inputCh = &s, 'a'
-		case '/':
-			s := ""
-			t.input, t.inputCh = &s, '/'
-		case ':':
-			s := ""
-			t.input, t.inputCh = &s, ':'
-		case 'n':
-			t.findNext(1)
-		case 'N':
-			t.findNext(-1)
-		}
-	}
+	})
 }

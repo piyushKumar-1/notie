@@ -13,7 +13,6 @@ const (
 	cItalic = "\x1b[3m"
 	cStrike = "\x1b[9m"
 
-	cAccent  = "\x1b[38;5;110m" // soft blue
 	cGreen   = "\x1b[38;5;114m"
 	cYellow  = "\x1b[38;5;179m"
 	cMagenta = "\x1b[38;5;176m"
@@ -24,15 +23,36 @@ const (
 	cCursor = "\x1b[48;5;236m"            // selected-row background
 	cHit    = "\x1b[48;5;58;38;5;229m"    // search-match highlight
 
-	iTask     = "○"
-	iTaskDone = "✔"
-	iJournal  = "◉"
-	iStar     = "★"
-	iDiamond  = "◆"
-	iCursor   = "❯"
-	iDate     = "▸"
-	iBullet   = "•"
+	iTask      = "○"
+	iTaskDone  = "✔"
+	iJournal   = "◉"
+	iStar      = "★"
+	iDiamond   = "◆"
+	iCursor    = "❯"
+	iDate      = "▸"
+	iBullet    = "•"
+	iEdit      = "✎"
+	iBar       = "▎" // focused-entry left marker
+	iAgent     = "»" // shell command run by an agent (e.g. Claude Code)
+	iToggleOn  = "◉"
+	iToggleOff = "○"
+	iSettings  = "≡"
 )
+
+// cAccent is the UI accent color. It is a var, not a const, so the settings TUI
+// can recolor the interface live; applyConfig sets it from ui.accent at startup.
+var cAccent = "\x1b[38;5;110m" // soft blue
+
+// accentPalette lists the selectable UI accents by friendly name.
+var accentPalette = []struct{ name, code string }{
+	{"blue", "\x1b[38;5;110m"},
+	{"green", "\x1b[38;5;114m"},
+	{"magenta", "\x1b[38;5;176m"},
+	{"yellow", "\x1b[38;5;179m"},
+	{"red", "\x1b[38;5;174m"},
+	{"cyan", "\x1b[38;5;80m"},
+	{"orange", "\x1b[38;5;173m"},
+}
 
 func runeLen(s string) int { return len([]rune(s)) }
 
