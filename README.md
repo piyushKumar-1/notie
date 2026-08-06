@@ -82,10 +82,12 @@ ids; they still live in `task.md` for `notie task done <id>`.
 
 Any task can carry a free-form **description** (details, pointers, links — short
 or long). Add one up front with `notie task "text" -d "the details"`, or press
-`↵` on a task in the interactive list to open its detail pane and `e` to edit it
-in `$EDITOR` (vim by default). A `⋮` in the list marks tasks that have details.
-Descriptions live one file per task in `~/.notie/task-details/<id>.md`, so
-`task.md` stays one line per task; deleting a task removes its description too.
+`↵` on a task in the interactive list to open its detail pane, then `e` to edit
+it in a small built-in multi-line editor (arrow keys move, `↵` inserts a newline,
+`esc` saves, `^c` discards) — no external `$EDITOR` needed. A `⋮` in the list
+marks tasks that have details. Descriptions live one file per task in
+`~/.notie/task-details/<id>.md`, so `task.md` stays one line per task; deleting a
+task removes its description too.
 
 ## Writing things up late
 

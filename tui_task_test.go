@@ -1,11 +1,21 @@
 package main
 
 import (
+	"bufio"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// muteStdout redirects os.Stdout to /dev/null for the rest of the test, so the
+// editor's raw screen escapes don't pollute `go test` output.
+func muteStdout(t *testing.T) {
+	t.Helper()
+	old := os.Stdout
+	devnull, _ := os.Open(os.DevNull)
+	os.Stdout = devnull
+	t.Cleanup(func() { os.Stdout = old; devnull.Close() })
+}
 
 // TestTaskDetailStorage covers the per-id description file: write, read, the
 // has-detail check, blank-write removal, and explicit removal.
@@ -63,29 +73,34 @@ func TestRowDetailMarker(t *testing.T) {
 	}
 }
 
-// TestEditFileInvokesEditor checks editFile resolves $EDITOR and passes the
-// target path as its final argument. A stub editor writes to that path so we
-// can confirm it ran against the right file.
-func TestEditFileInvokesEditor(t *testing.T) {
-	dir := t.TempDir()
-	stub := filepath.Join(dir, "stub-editor")
-	if err := os.WriteFile(stub, []byte("#!/bin/sh\nprintf 'edited by stub' > \"$1\"\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	target := filepath.Join(dir, "note.md")
-	t.Setenv("VISUAL", "")
-	t.Setenv("EDITOR", stub)
+// TestEditTextTypingAndSave drives the in-TUI editor through readEditKey:
+// typing, a newline, a backspace, then Esc to save. It confirms editText
+// returns the assembled multi-line text.
+func TestEditTextTypingAndSave(t *testing.T) {
+	// "ab", Enter, "c", Backspace, "de", Esc  ->  "ab\nde"
+	muteStdout(t)
+	keys := []byte{'a', 'b', '\r', 'c', 127, 'd', 'e', 27}
+	r := bufio.NewReader(strings.NewReader(string(keys)))
 
-	// editFile writes screen-control escapes to stdout; silence them.
-	old := os.Stdout
-	os.Stdout, _ = os.Open(os.DevNull)
-	err := editFile(target)
-	os.Stdout = old
-	if err != nil {
-		t.Fatalf("editFile returned %v", err)
+	out, ok := editText(r, "task", "")
+	if !ok {
+		t.Fatal("editText reported discard, expected save")
 	}
-	if got, _ := os.ReadFile(target); string(got) != "edited by stub" {
-		t.Fatalf("editor did not edit target, got %q", got)
+	if out != "ab\nde" {
+		t.Fatalf("editText = %q, want %q", out, "ab\nde")
+	}
+}
+
+// TestEditTextDiscard checks ^C returns the original seed unchanged.
+func TestEditTextDiscard(t *testing.T) {
+	muteStdout(t)
+	r := bufio.NewReader(strings.NewReader(string([]byte{'x', 'y', 3})))
+	out, ok := editText(r, "task", "seed")
+	if ok {
+		t.Fatal("editText reported save, expected discard")
+	}
+	if out != "seed" {
+		t.Fatalf("discard returned %q, want original %q", out, "seed")
 	}
 }
 

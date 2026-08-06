@@ -66,6 +66,70 @@ func restoreTerm(old termios) {
 	ioctlPtr(os.Stdin.Fd(), tiocseta, unsafe.Pointer(&old))
 }
 
+// Editor key codes returned by readEditKey for the keys that plain readKey
+// folds into vim motions. Negative so they never collide with a byte value.
+const (
+	keyUp = -1 - iota
+	keyDown
+	keyLeft
+	keyRight
+	keyHome
+	keyEnd
+	keyDel
+	keyPgUp
+	keyPgDn
+)
+
+// readEditKey is like readKey but keeps arrow/navigation keys as distinct codes
+// instead of remapping them to hjkl — the multi-line detail editor needs real
+// cursor keys while letters stay literal text. A lone ESC returns 27.
+func readEditKey(r *bufio.Reader) (int, error) {
+	c, err := r.ReadByte()
+	if err != nil {
+		return 0, err
+	}
+	if c != 27 {
+		return int(c), nil
+	}
+	if r.Buffered() < 2 {
+		return 27, nil
+	}
+	b1, _ := r.ReadByte()
+	if b1 != '[' && b1 != 'O' {
+		return 27, nil
+	}
+	switch b2, _ := r.ReadByte(); b2 {
+	case 'A':
+		return keyUp, nil
+	case 'B':
+		return keyDown, nil
+	case 'C':
+		return keyRight, nil
+	case 'D':
+		return keyLeft, nil
+	case 'H':
+		return keyHome, nil
+	case 'F':
+		return keyEnd, nil
+	case '1', '7':
+		r.ReadByte() // consume trailing '~'
+		return keyHome, nil
+	case '4', '8':
+		r.ReadByte()
+		return keyEnd, nil
+	case '3':
+		r.ReadByte()
+		return keyDel, nil
+	case '5':
+		r.ReadByte()
+		return keyPgUp, nil
+	case '6':
+		r.ReadByte()
+		return keyPgDn, nil
+	}
+	return 27, nil
+}
+
 // readKey returns the next keypress, mapping arrow/page keys to their vim
 // equivalents ('k','j','l','h', ctrl-u, ctrl-d). A lone ESC returns 27.
 func readKey(r *bufio.Reader) (byte, error) {

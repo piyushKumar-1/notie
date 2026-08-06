@@ -206,21 +206,6 @@ func (t *taskTUI) openDetail() {
 	t.detail, t.detailID, t.detailSum, t.detailOff = true, m[2], m[4], 0
 }
 
-// editDetail hands the selected task's description file to $EDITOR (vim),
-// then normalizes an emptied file away.
-func (t *taskTUI) editDetail() {
-	if err := os.MkdirAll(taskDetailsDir(), 0o755); err != nil {
-		t.status = cRed + "cannot create details dir" + cReset
-		return
-	}
-	editFile(taskDetailPath(t.detailID))
-	if strings.TrimSpace(readTaskDetail(t.detailID)) == "" {
-		removeTaskDetail(t.detailID)
-	}
-	t.detailOff = 0
-	t.status = cGreen + "details saved" + cReset
-}
-
 // renderDetail draws the detail pane: the task summary, then its description
 // wrapped and vertically scrollable.
 func (t *taskTUI) renderDetail() {
@@ -453,7 +438,11 @@ func runTaskTUI() {
 				case 'G':
 					t.detailOff = 1 << 30 // clamped to the bottom in renderDetail
 				case 'e', 'i', 13, 10, 'l':
-					t.editDetail()
+					if out, ok := editText(r, t.detailSum, readTaskDetail(t.detailID)); ok {
+						writeTaskDetail(t.detailID, out)
+						t.detailOff = 0
+						t.status = cGreen + "details saved" + cReset
+					}
 				}
 				continue
 			}
