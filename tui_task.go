@@ -23,6 +23,11 @@ type taskTUI struct {
 	in       *lineInput // non-nil while typing (add, search, command or edit)
 	search   string
 	status   string
+
+	detail    bool   // detail pane open (Enter on a task)
+	detailID  string // id of the task shown in the detail pane
+	detailSum string // that task's one-line summary (for the pane header)
+	detailOff int    // scroll offset within the detail pane
 }
 
 // reload rebuilds the visible task list: grouped by priority (0·1·2, unmarked
@@ -84,6 +89,10 @@ func (t *taskTUI) row(l string, selected bool, cols int) (string, int) {
 	if done && m[6] != "" {
 		meta += " " + iTaskDone + " " + m[6]
 	}
+	// a trailing ⋮ marks tasks that carry a description (press ↵ to read it).
+	if m[2] != "" && hasTaskDetail(m[2]) {
+		meta += " " + iNote
+	}
 	pri, priW := "", 0
 	if m[3] != "" {
 		pc := cGrey
@@ -112,6 +121,10 @@ func (t *taskTUI) row(l string, selected bool, cols int) (string, int) {
 }
 
 func (t *taskTUI) render() {
+	if t.detail {
+		t.renderDetail()
+		return
+	}
 	var b strings.Builder
 	b.WriteString("\x1b[H\x1b[2J")
 	rows, cols := termSize()
@@ -176,7 +189,77 @@ func (t *taskTUI) render() {
 	case t.search != "":
 		b.WriteString(cAccent + " /" + t.search + cReset + cGrey + "  n/N next/prev · esc clear" + cReset)
 	default:
-		b.WriteString(cGrey + " j/k move · x toggle · 0-2 pri · . done · e edit · dd del · yy copy · a add · / search · q quit" + cReset)
+		b.WriteString(cGrey + " j/k move · x toggle · 0-2 pri · ↵ details · e edit · dd del · yy copy · a add · / search · q quit" + cReset)
+	}
+	os.Stdout.WriteString(b.String())
+}
+
+// openDetail opens the detail pane for the selected task.
+func (t *taskTUI) openDetail() {
+	if len(t.tasks) == 0 {
+		return
+	}
+	m := taskFullRe.FindStringSubmatch(t.lines[t.tasks[t.cursor]])
+	if m == nil {
+		return
+	}
+	t.detail, t.detailID, t.detailSum, t.detailOff = true, m[2], m[4], 0
+}
+
+// editDetail hands the selected task's description file to $EDITOR (vim),
+// then normalizes an emptied file away.
+func (t *taskTUI) editDetail() {
+	if err := os.MkdirAll(taskDetailsDir(), 0o755); err != nil {
+		t.status = cRed + "cannot create details dir" + cReset
+		return
+	}
+	editFile(taskDetailPath(t.detailID))
+	if strings.TrimSpace(readTaskDetail(t.detailID)) == "" {
+		removeTaskDetail(t.detailID)
+	}
+	t.detailOff = 0
+	t.status = cGreen + "details saved" + cReset
+}
+
+// renderDetail draws the detail pane: the task summary, then its description
+// wrapped and vertically scrollable.
+func (t *taskTUI) renderDetail() {
+	var b strings.Builder
+	b.WriteString("\x1b[H\x1b[2J")
+	rows, cols := termSize()
+	b.WriteString(titleBar(cols, iTaskDone+" notie · task details", "#"+t.detailID) + "\r\n")
+	b.WriteString("  " + cBold + truncRunes(t.detailSum, max(4, cols-4)) + cReset + "\r\n")
+
+	var body []string
+	if raw := readTaskDetail(t.detailID); strings.TrimSpace(raw) == "" {
+		body = []string{cGrey + "no details yet — press e to add" + cReset}
+	} else {
+		for _, ln := range strings.Split(raw, "\n") {
+			if ln == "" {
+				body = append(body, "")
+				continue
+			}
+			body = append(body, wrapRunes(ln, max(4, cols-4))...)
+		}
+	}
+
+	avail := max(1, rows-3) // title + summary + footer
+	maxOff := max(0, len(body)-avail)
+	if t.detailOff > maxOff {
+		t.detailOff = maxOff
+	}
+	if t.detailOff < 0 {
+		t.detailOff = 0
+	}
+	for i := t.detailOff; i < len(body) && i < t.detailOff+avail; i++ {
+		b.WriteString("  " + body[i] + cReset + "\r\n")
+	}
+
+	b.WriteString(fmt.Sprintf("\x1b[%d;1H", rows))
+	if t.status != "" {
+		b.WriteString(" " + t.status)
+	} else {
+		b.WriteString(cGrey + " j/k scroll · e edit · q back" + cReset)
 	}
 	os.Stdout.WriteString(b.String())
 }
@@ -205,6 +288,9 @@ func (t *taskTUI) delete() {
 		return
 	}
 	i := t.tasks[t.cursor]
+	if m := taskRe.FindStringSubmatch(t.lines[i]); m != nil {
+		removeTaskDetail(m[1])
+	}
 	t.lines = append(t.lines[:i], t.lines[i+1:]...)
 	t.save()
 	t.status = cRed + "deleted" + cReset
@@ -348,6 +434,30 @@ func runTaskTUI() {
 				continue
 			}
 
+			// Detail pane: scroll, edit in $EDITOR, or back to the list.
+			if t.detail {
+				t.status = ""
+				switch c {
+				case 'q', 27, 3, 'h':
+					t.detail = false
+				case 'j':
+					t.detailOff++
+				case 'k':
+					t.detailOff--
+				case 4: // ctrl-d
+					t.detailOff += 5
+				case 21: // ctrl-u
+					t.detailOff -= 5
+				case 'g':
+					t.detailOff = 0
+				case 'G':
+					t.detailOff = 1 << 30 // clamped to the bottom in renderDetail
+				case 'e', 'i', 13, 10, 'l':
+					t.editDetail()
+				}
+				continue
+			}
+
 			t.status = ""
 			if t.pending == 'd' {
 				t.pending = 0
@@ -417,6 +527,8 @@ func runTaskTUI() {
 						t.in = &lineInput{kind: 'e', buf: m[4]}
 					}
 				}
+			case 13, 10: // Enter — open the task's details
+				t.openDetail()
 			case 'a', 'o':
 				t.in = &lineInput{kind: 'a'}
 			case '/':

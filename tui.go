@@ -9,6 +9,12 @@ import (
 	"strings"
 )
 
+// savedCooked holds the pre-raw terminal state captured by the active
+// runScreen, so editFile can hand a cooked terminal to an external editor and
+// restore raw mode afterward. Set only while a TUI screen is up; the TUIs are
+// never nested, so a single global is enough.
+var savedCooked termios
+
 // runScreen runs loop inside the alternate screen with raw mode and a hidden
 // cursor, restoring the terminal afterward. When raw mode is unavailable (no
 // TTY) it calls fallback — the plain, non-interactive output path — instead.
@@ -18,6 +24,7 @@ func runScreen(fallback func(), loop func(*bufio.Reader)) {
 		fallback()
 		return
 	}
+	savedCooked = old
 	os.Stdout.WriteString("\x1b[?1049h\x1b[?25l")
 	defer func() {
 		os.Stdout.WriteString("\x1b[?1049l\x1b[?25h")
@@ -68,6 +75,32 @@ func cycle(n, cur, dir int, match func(int) bool) (int, bool) {
 // block cursor.
 func inputBar(prefix, buf string) string {
 	return prefix + buf + cCursor + " " + cReset
+}
+
+// editFile suspends the alternate-screen TUI — dropping back to the cooked
+// terminal and the primary screen — runs $VISUAL/$EDITOR (falling back to vim)
+// on path, then restores raw mode and the alternate screen when the editor
+// exits. Meant to be called from inside a runScreen loop.
+func editFile(path string) error {
+	editor := os.Getenv("VISUAL")
+	if editor == "" {
+		editor = os.Getenv("EDITOR")
+	}
+	if editor == "" {
+		editor = "vim"
+	}
+	fields := strings.Fields(editor)
+	if len(fields) == 0 {
+		fields = []string{"vim"}
+	}
+	os.Stdout.WriteString("\x1b[?1049l\x1b[?25h")
+	restoreTerm(savedCooked)
+	cmd := exec.Command(fields[0], append(fields[1:], path)...)
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	err := cmd.Run()
+	enterRaw()
+	os.Stdout.WriteString("\x1b[?1049h\x1b[?25l")
+	return err
 }
 
 // copyClipboard puts s on the macOS clipboard via pbcopy.

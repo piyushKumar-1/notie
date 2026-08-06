@@ -28,7 +28,9 @@ notie did <date> "text" record a task that was already done on that day
 notie log "cmd"         append a shell command to today's audit trail
 notie addi "text"       append to important.md
 notie remember "text"   append to remember.md
-notie task [0|1|2] "text"  add a task (0 high · 1 normal · 2 low; default 2)
+notie task [0|1|2] "text" [-d "details"]
+                        add a task; -d attaches an optional description
+                        (0 high · 1 normal · 2 low priority; default 2)
 notie radd              record voice, transcribe, append to today's journal
                         (also: rjournal · raddi/rimportant · rremember · rtask)
 notie task              interactive task list (done tasks hidden by default)
@@ -67,8 +69,8 @@ skill is installed, an upgrade refreshes it too.
 
 TUI keys: `j`/`k` move · `gg`/`G` top/bottom · `x` toggle (tasks)
 · `0`/`1`/`2` set priority (tasks) · `.` show/hide done (tasks) · `dd` delete
-· `a` add · `/` search · `n`/`N` next/prev · `q` or `:q` quit
-· `:ff <pat>` find date files · `:fg <pat>` find mentions
+· `↵` open a task's details (tasks) · `a` add · `/` search · `n`/`N` next/prev
+· `q` or `:q` quit · `:ff <pat>` find date files · `:fg <pat>` find mentions
 
 In the journal browser, `a` adds to the **selected** day, so scrolling back and
 pressing `a` is the interactive way to write up a day you missed.
@@ -77,6 +79,13 @@ Task lists are grouped by priority (`!0` → `!1` → `!2`), oldest first within
 group; tasks predating priorities sort last. Priority is optional everywhere a
 task is added — omit it and the task gets `!2`. The interactive list hides task
 ids; they still live in `task.md` for `notie task done <id>`.
+
+Any task can carry a free-form **description** (details, pointers, links — short
+or long). Add one up front with `notie task "text" -d "the details"`, or press
+`↵` on a task in the interactive list to open its detail pane and `e` to edit it
+in `$EDITOR` (vim by default). A `⋮` in the list marks tasks that have details.
+Descriptions live one file per task in `~/.notie/task-details/<id>.md`, so
+`task.md` stays one line per task; deleting a task removes its description too.
 
 ## Writing things up late
 
@@ -100,6 +109,7 @@ command says so — run `notie cache <date>` to rebuild that one line.
 │   ├── journal.md      timestamped journal entries for the day
 │   └── shell.md        shell audit trail for the day
 ├── task.md             tasks with ids, e.g. "- [ ] #12 !1 buy milk (added 2026-07-22)"
+├── task-details/       one file per task id (#12 → 12.md) holding its description
 ├── important.md        dated important notes
 ├── remember.md         dated things to remember
 ├── datecache.md        one-line-per-day summaries built by `notie cache`

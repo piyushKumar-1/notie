@@ -104,7 +104,9 @@ func usage() {
   notie setup-claude-hook register a Claude Code hook so its shell commands are logged
   notie addi "text"       append to important.md
   notie remember "text"   append to remember.md
-  notie task [0|1|2] "text"  add a task (0 high · 1 normal · 2 low; default 2)
+  notie task [0|1|2] "text" [-d "details"]
+                          add a task (0 high · 1 normal · 2 low; default 2);
+                          -d attaches an optional description
   notie radd              record voice, transcribe, append to today's journal
                           (also: rjournal · raddi/rimportant · rremember · rtask)
   notie task              interactive task list (done tasks hidden — . shows them)
@@ -127,7 +129,8 @@ func usage() {
 
   TUI keys: ↑/↓ (j/k) move · ←/→ (h/l) switch pane in the day browsers
             gg/G top/bottom · x toggle (tasks) · 0/1/2 priority · . show/hide done
-            a add · e edit · dd delete · / search · n/N next/prev · t today
+            a add · e edit · ↵ details (tasks) · dd delete · / search
+            n/N next/prev · t today
             q/:q quit · :ff <pat> find date files · :fg <pat> find mentions
 `)
 }
@@ -392,6 +395,63 @@ func taskPath() string {
 var taskRe = regexp.MustCompile(`^- \[[ x]\] #(\d+) `)
 var taskPriRe = regexp.MustCompile(`^- \[[ x]\] #\d+ !([0-2]) `)
 
+// ---- task details ----
+//
+// A task's free-form description (details, pointers, notes — short or long,
+// possibly multi-line) lives in its own file so task.md stays one line per
+// task and every existing parser keeps working. An absent or blank file means
+// the task has no description.
+
+func taskDetailsDir() string { return filepath.Join(notieDir(), "task-details") }
+
+func taskDetailPath(id string) string { return filepath.Join(taskDetailsDir(), id+".md") }
+
+// readTaskDetail returns task id's description with trailing newlines trimmed,
+// or "" if it has none.
+func readTaskDetail(id string) string {
+	data, err := os.ReadFile(taskDetailPath(id))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimRight(string(data), "\n")
+}
+
+// hasTaskDetail reports whether task id has a non-empty description.
+func hasTaskDetail(id string) bool {
+	return strings.TrimSpace(readTaskDetail(id)) != ""
+}
+
+// writeTaskDetail stores text as task id's description, creating the details
+// dir as needed. Blank text removes the description instead.
+func writeTaskDetail(id, text string) {
+	text = strings.TrimRight(text, "\n")
+	if strings.TrimSpace(text) == "" {
+		removeTaskDetail(id)
+		return
+	}
+	if err := os.MkdirAll(taskDetailsDir(), 0o755); err != nil {
+		fatal("creating %s: %v", taskDetailsDir(), err)
+	}
+	if err := os.WriteFile(taskDetailPath(id), []byte(text+"\n"), 0o644); err != nil {
+		fatal("writing %s: %v", taskDetailPath(id), err)
+	}
+}
+
+// removeTaskDetail deletes task id's description file if present.
+func removeTaskDetail(id string) { os.Remove(taskDetailPath(id)) }
+
+// splitDetailFlag splits an add's args at a "-d" flag: everything before it is
+// the task text, everything after is the description. hasDetail is false when
+// no "-d" is present.
+func splitDetailFlag(args []string) (text, detail string, hasDetail bool) {
+	for i, a := range args {
+		if a == "-d" {
+			return strings.Join(args[:i], " "), strings.Join(args[i+1:], " "), true
+		}
+	}
+	return strings.Join(args, " "), "", false
+}
+
 // taskPri returns a task's priority (0 high · 1 normal · 2 low). Lines
 // without a marker (pre-priority tasks) sort after every prioritized group.
 func taskPri(l string) int {
@@ -471,6 +531,7 @@ func taskEdit(idStr, action string) {
 		found = true
 		switch action {
 		case "del":
+			removeTaskDetail(idStr)
 			continue
 		case "done":
 			l = strings.Replace(l, "- [ ]", "- [x]", 1)
@@ -521,17 +582,22 @@ func cmdTask(args []string) {
 		taskEdit(args[1], args[0])
 	default:
 		// A leading 0|1|2 sets the priority; without one the task takes the
-		// default, so "notie task \"buy milk\"" works.
+		// default, so "notie task \"buy milk\"" works. An optional "-d <text>"
+		// tail attaches a description.
 		pri, rest := defaultPri(), args
 		if args[0] == "0" || args[0] == "1" || args[0] == "2" {
 			pri, rest = args[0], args[1:]
 		}
-		desc := strings.TrimSpace(strings.Join(rest, " "))
+		text, detail, _ := splitDetailFlag(rest)
+		desc := strings.TrimSpace(text)
 		if desc == "" {
-			fatal("missing text — notie task [0|1|2] \"text\"")
+			fatal("missing text — notie task [0|1|2] \"text\" [-d \"details\"]")
 		}
 		id := nextID()
 		appendLine(taskPath(), "Tasks", fmt.Sprintf("- [ ] #%d !%s %s (added %s)", id, pri, desc, today()))
+		if strings.TrimSpace(detail) != "" {
+			writeTaskDetail(strconv.Itoa(id), detail)
+		}
 		fmt.Printf("added task #%d\n---\n", id)
 		printTasks()
 	}

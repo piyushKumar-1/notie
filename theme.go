@@ -32,6 +32,7 @@ const (
 	iDate      = "▸"
 	iBullet    = "•"
 	iEdit      = "✎"
+	iNote      = "⋮" // task has a description / details
 	iBar       = "▎" // focused-entry left marker
 	iAgent     = "»" // shell command run by an agent (e.g. Claude Code)
 	iToggleOn  = "◉"

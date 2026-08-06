@@ -1,0 +1,64 @@
+name: Build binaries
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # notie is pure Go stdlib, so every target cross-compiles from this Linux
+      # runner with CGO off. Building inside the checkout lets Go stamp the
+      # commit into the binary (backs `notie version` / `notie upgrade`).
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          mkdir -p dist
+          go build -trimpath -o "dist/notie" .
+          ( cd dist && sha256sum notie > "notie.sha256" )
+
+      # Only the native linux/amd64 binary can run on the runner; use it to
+      # confirm the build boots and stamped its commit.
+      - name: Smoke check
+        if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
+        run: ./dist/notie version
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: notie-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/notie*
+          if-no-files-found: error
