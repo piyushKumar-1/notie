@@ -74,12 +74,13 @@ func TestRowDetailMarker(t *testing.T) {
 }
 
 // TestEditTextTypingAndSave drives the in-TUI editor through readEditKey:
-// typing, a newline, a backspace, then Esc to save. It confirms editText
-// returns the assembled multi-line text.
+// typing, a newline, a backspace, then Esc to leave insert mode and Esc again
+// to save. It confirms editText returns the assembled multi-line text.
 func TestEditTextTypingAndSave(t *testing.T) {
-	// "ab", Enter, "c", Backspace, "de", Esc  ->  "ab\nde"
+	t.Setenv("NOTIE_DIR", t.TempDir()) // isolate config (modal editing defaults on)
+	// "ab", Enter, "c", Backspace, "de", Esc (→normal), Esc (save)  ->  "ab\nde"
 	muteStdout(t)
-	keys := []byte{'a', 'b', '\r', 'c', 127, 'd', 'e', 27}
+	keys := []byte{'a', 'b', '\r', 'c', 127, 'd', 'e', 27, 27}
 	r := bufio.NewReader(strings.NewReader(string(keys)))
 
 	out, ok := editText(r, "task", "")
@@ -93,6 +94,7 @@ func TestEditTextTypingAndSave(t *testing.T) {
 
 // TestEditTextDiscard checks ^C returns the original seed unchanged.
 func TestEditTextDiscard(t *testing.T) {
+	t.Setenv("NOTIE_DIR", t.TempDir())
 	muteStdout(t)
 	r := bufio.NewReader(strings.NewReader(string([]byte{'x', 'y', 3})))
 	out, ok := editText(r, "task", "seed")

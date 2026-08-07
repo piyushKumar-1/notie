@@ -27,6 +27,36 @@ type notesTUI struct {
 	in      *lineInput
 	search  string
 	status  string
+	undo    []notesUndo // session undo stack (u restores)
+}
+
+// notesUndo snapshots the note file and cursor before a destructive edit.
+type notesUndo struct {
+	lines  []string
+	cursor int
+}
+
+func (t *notesTUI) pushUndo() {
+	cp := append([]string(nil), t.lines...)
+	t.undo = append(t.undo, notesUndo{cp, t.cursor})
+	if len(t.undo) > 100 {
+		t.undo = t.undo[1:]
+	}
+}
+
+func (t *notesTUI) popUndo() {
+	if len(t.undo) == 0 {
+		t.status = cGrey + "nothing to undo" + cReset
+		return
+	}
+	u := t.undo[len(t.undo)-1]
+	t.undo = t.undo[:len(t.undo)-1]
+	writeLines(t.path(), u.lines)
+	t.reload()
+	if len(t.notes) > 0 {
+		t.cursor = min(u.cursor, len(t.notes)-1)
+	}
+	t.status = cGreen + "undo" + cReset
 }
 
 func (t *notesTUI) path() string { return notieDir() + "/" + t.cfg.file }
@@ -96,13 +126,13 @@ func (t *notesTUI) render() {
 	b.WriteString(fmt.Sprintf("\x1b[%d;1H", rows))
 	switch {
 	case t.in != nil && t.in.kind == 'a':
-		b.WriteString(inputBar(t.cfg.iconColor+" + "+cReset, t.in.buf))
+		b.WriteString(inputBar(t.cfg.iconColor+" + "+cReset, t.in))
 	case t.in != nil && t.in.kind == 'e':
-		b.WriteString(inputBar(cYellow+" "+iEdit+" "+cReset, t.in.buf))
+		b.WriteString(inputBar(cYellow+" "+iEdit+" "+cReset, t.in))
 	case t.in != nil && t.in.kind == '/':
-		b.WriteString(inputBar(cAccent+" /"+cReset, t.in.buf))
+		b.WriteString(inputBar(cAccent+" /"+cReset, t.in))
 	case t.in != nil && t.in.kind == ':':
-		b.WriteString(inputBar(cYellow+" :"+cReset, t.in.buf))
+		b.WriteString(inputBar(cYellow+" :"+cReset, t.in))
 	case t.pending == 'd':
 		b.WriteString(cRed + " d… delete? press d again" + cReset)
 	case t.status != "":
@@ -133,11 +163,12 @@ func (t *notesTUI) deleteNote() {
 	if len(t.notes) == 0 {
 		return
 	}
+	t.pushUndo()
 	i := t.notes[t.cursor]
 	t.lines = append(t.lines[:i], t.lines[i+1:]...)
 	writeLines(t.path(), t.lines)
 	t.reload()
-	t.status = cRed + "deleted" + cReset
+	t.status = cRed + "deleted · u to undo" + cReset
 }
 
 // yank copies the selected note's text to the clipboard.
@@ -162,6 +193,7 @@ func (t *notesTUI) editNote(text string) {
 	if m == nil {
 		return
 	}
+	t.pushUndo()
 	t.lines[i] = "- " + m[1] + " " + m[2] + " — " + text
 	writeLines(t.path(), t.lines)
 	t.reload()
@@ -174,12 +206,11 @@ func runNotesTUI(cfg notesCfg) {
 	runScreen(func() { printFile(notieDir()+"/"+cfg.file, "empty") }, func(r *bufio.Reader) {
 		for {
 			t.render()
-			c, err := readKey(r)
-			if err != nil {
-				return
-			}
-
 			if t.in != nil {
+				c, err := readEditKey(r)
+				if err != nil {
+					return
+				}
 				switch t.in.key(c) {
 				case "cancel":
 					t.in = nil
@@ -189,6 +220,7 @@ func runNotesTUI(cfg notesCfg) {
 					switch kind {
 					case 'a':
 						if val != "" {
+							t.pushUndo()
 							appendLine(t.path(), t.cfg.header,
 								fmt.Sprintf("- %s %s — %s", today(), clock(), val))
 							t.reload()
@@ -216,11 +248,29 @@ func runNotesTUI(cfg notesCfg) {
 				continue
 			}
 
+			c, err := readKey(r)
+			if err != nil {
+				return
+			}
+
 			t.status = ""
 			if t.pending == 'd' {
 				t.pending = 0
 				if c == 'd' {
+					if confirmDelete() {
+						t.pending, t.status = 'D', cYellow+"press y to delete · any key cancels"+cReset
+					} else {
+						t.deleteNote()
+					}
+				}
+				continue
+			}
+			if t.pending == 'D' {
+				t.pending = 0
+				if c == 'y' {
 					t.deleteNote()
+				} else {
+					t.status = cGrey + "cancelled" + cReset
 				}
 				continue
 			}
@@ -259,25 +309,23 @@ func runNotesTUI(cfg notesCfg) {
 					t.cursor = len(t.notes) - 1
 				}
 			case 'd':
-				if confirmDelete() {
-					t.pending = 'd'
-				} else {
-					t.deleteNote()
-				}
+				t.pending = 'd' // dd deletes; u undoes
+			case 'u':
+				t.popUndo()
 			case 'y':
 				t.pending = 'y'
 			case 'e':
 				if len(t.notes) > 0 {
 					if m := noteLineRe.FindStringSubmatch(t.lines[t.notes[t.cursor]]); m != nil {
-						t.in = &lineInput{kind: 'e', buf: m[3]}
+						t.in = newLineInput('e', m[3])
 					}
 				}
 			case 'a', 'o':
-				t.in = &lineInput{kind: 'a'}
+				t.in = newLineInput('a', "")
 			case '/':
-				t.in = &lineInput{kind: '/'}
+				t.in = newLineInput('/', "")
 			case ':':
-				t.in = &lineInput{kind: ':'}
+				t.in = newLineInput(':', "")
 			case 'n':
 				t.findNext(1)
 			case 'N':

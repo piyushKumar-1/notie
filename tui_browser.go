@@ -37,8 +37,11 @@ type browserCfg struct {
 	add func(d, text string) string
 	// edit rewrites entry i's text; del removes it. Both nil ⇒ a read-only
 	// content pane (shell). i indexes into entries(d).
-	edit      func(d string, i int, text string)
-	del       func(d string, i int)
+	edit func(d string, i int, text string)
+	del  func(d string, i int)
+	// file returns the on-disk file backing day d, so an edit/add/delete can be
+	// snapshotted for undo. nil ⇒ no undo (read-only sources like shell).
+	file      func(d string) string
 	summaries func() map[string]string // nil: no per-day summary line
 	fallback  func()                   // plain output when raw mode fails
 	empty     string                   // message when there are no days
@@ -74,7 +77,8 @@ func journalBrowser() browserCfg {
 			}
 			return out
 		},
-		add: func(d, text string) string { addJournal(d, clock(), text); return d },
+		add:  func(d, text string) string { addJournal(d, clock(), text); return d },
+		file: func(d string) string { return journalPath(d) },
 		edit: func(d string, i int, text string) {
 			path := journalPath(d)
 			lines := readLines(path)
@@ -185,6 +189,7 @@ func importantBrowser() browserCfg {
 			appendLine(path, "Important", fmt.Sprintf("- %s %s — %s", today(), clock(), text))
 			return today()
 		},
+		file: func(string) string { return path },
 		edit: func(d string, i int, text string) {
 			nth(d, i, func(li int, m, lines []string) {
 				lines[li] = "- " + m[1] + " " + m[2] + " — " + text
@@ -224,6 +229,58 @@ type browserTUI struct {
 	searchMode byte // 0: dates+content ('/') · 'd': dates (:ff) · 'c': content (:fg)
 	status     string
 	quit       bool
+	undo       []browserUndo // session undo stack (u restores)
+}
+
+// browserUndo snapshots one backing file before a destructive edit, so u can
+// restore it — including reviving a file an add had freshly created.
+type browserUndo struct {
+	path     string
+	existed  bool
+	content  []byte
+	date     string
+	entryCur int
+}
+
+// snapshot records the file backing day d before it is mutated. A no-op when
+// the source has no file accessor (read-only browsers).
+func (t *browserTUI) snapshot(d string) {
+	if t.cfg.file == nil {
+		return
+	}
+	path := t.cfg.file(d)
+	data, err := os.ReadFile(path)
+	t.undo = append(t.undo, browserUndo{path, err == nil, data, d, t.entryCur})
+	if len(t.undo) > 100 {
+		t.undo = t.undo[1:]
+	}
+}
+
+// popUndo restores the most recent file snapshot and re-selects the affected day.
+func (t *browserTUI) popUndo() {
+	if len(t.undo) == 0 {
+		t.status = cGrey + "nothing to undo" + cReset
+		return
+	}
+	u := t.undo[len(t.undo)-1]
+	t.undo = t.undo[:len(t.undo)-1]
+	if u.existed {
+		os.WriteFile(u.path, u.content, 0o644)
+	} else {
+		os.Remove(u.path) // the change had created the file — remove it again
+	}
+	t.reload()
+	for i, d := range t.dates {
+		if d == u.date {
+			t.selectDate(i)
+			break
+		}
+	}
+	t.loadDay()
+	if len(t.entries) > 0 {
+		t.entryCur = min(u.entryCur, len(t.entries)-1)
+	}
+	t.status = cGreen + "undo" + cReset
 }
 
 // selectDate moves to date i and resets the content pane to its top.
@@ -402,13 +459,13 @@ func (t *browserTUI) render() {
 	b.WriteString(fmt.Sprintf("\x1b[%d;1H", rows))
 	switch {
 	case t.in != nil && t.in.kind == 'a':
-		b.WriteString(inputBar(cGreen+" + "+t.addTarget()+": "+cReset, t.in.buf))
+		b.WriteString(inputBar(cGreen+" + "+t.addTarget()+": "+cReset, t.in))
 	case t.in != nil && t.in.kind == 'e':
-		b.WriteString(inputBar(cYellow+" "+iEdit+" "+cReset, t.in.buf))
+		b.WriteString(inputBar(cYellow+" "+iEdit+" "+cReset, t.in))
 	case t.in != nil && t.in.kind == '/':
-		b.WriteString(inputBar(cAccent+" /"+cReset, t.in.buf))
+		b.WriteString(inputBar(cAccent+" /"+cReset, t.in))
 	case t.in != nil && t.in.kind == ':':
-		b.WriteString(inputBar(cYellow+" :"+cReset, t.in.buf))
+		b.WriteString(inputBar(cYellow+" :"+cReset, t.in))
 	case t.pending == 'd':
 		b.WriteString(cRed + " d… delete entry? press d again" + cReset)
 	case t.status != "":
@@ -455,9 +512,10 @@ func (t *browserTUI) dayMatches(d, q string) bool {
 // doDelete removes the focused content entry, if the source allows it.
 func (t *browserTUI) doDelete() {
 	if t.focus == 1 && t.cfg.del != nil && t.entryCur < len(t.entries) {
+		t.snapshot(t.dates[t.cursor])
 		t.cfg.del(t.dates[t.cursor], t.entryCur)
 		t.reload()
-		t.status = cRed + "deleted" + cReset
+		t.status = cRed + "deleted · u to undo" + cReset
 	}
 }
 
@@ -537,6 +595,7 @@ func (t *browserTUI) submit(kind byte, val string) {
 		if val == "" {
 			return
 		}
+		t.snapshot(t.addTarget())
 		wrote := t.cfg.add(t.addTarget(), val) // may differ from the selected day
 		t.reload()
 		for i, d := range t.dates {
@@ -552,6 +611,7 @@ func (t *browserTUI) submit(kind byte, val string) {
 		if val == "" || t.cfg.edit == nil || t.entryCur >= len(t.entries) {
 			return
 		}
+		t.snapshot(t.dates[t.cursor])
 		t.cfg.edit(t.dates[t.cursor], t.entryCur, val)
 		t.reload()
 		t.status = cGreen + "updated" + cReset
@@ -571,12 +631,11 @@ func runBrowser(cfg browserCfg) {
 	runScreen(cfg.fallback, func(r *bufio.Reader) {
 		for {
 			t.render()
-			c, err := readKey(r)
-			if err != nil {
-				return
-			}
-
 			if t.in != nil {
+				c, err := readEditKey(r)
+				if err != nil {
+					return
+				}
 				switch t.in.key(c) {
 				case "":
 					if t.in.kind == ':' {
@@ -595,6 +654,11 @@ func runBrowser(cfg browserCfg) {
 				continue
 			}
 
+			c, err := readKey(r)
+			if err != nil {
+				return
+			}
+
 			t.status = ""
 			if t.pending == 'g' {
 				t.pending = 0
@@ -610,7 +674,20 @@ func runBrowser(cfg browserCfg) {
 			if t.pending == 'd' {
 				t.pending = 0
 				if c == 'd' {
+					if confirmDelete() {
+						t.pending, t.status = 'D', cYellow+"press y to delete · any key cancels"+cReset
+					} else {
+						t.doDelete()
+					}
+				}
+				continue
+			}
+			if t.pending == 'D' {
+				t.pending = 0
+				if c == 'y' {
 					t.doDelete()
+				} else {
+					t.status = cGrey + "cancelled" + cReset
 				}
 				continue
 			}
@@ -679,26 +756,24 @@ func runBrowser(cfg browserCfg) {
 				}
 			case 'a', 'o':
 				if t.cfg.add != nil {
-					t.in = &lineInput{kind: 'a'}
+					t.in = newLineInput('a', "")
 				}
 			case 'e':
 				if t.focus == 1 && t.cfg.edit != nil && t.entryCur < len(t.entries) {
-					t.in = &lineInput{kind: 'e', buf: t.entries[t.entryCur].text}
+					t.in = newLineInput('e', t.entries[t.entryCur].text)
 				}
 			case 'd':
 				if t.focus == 1 && t.cfg.del != nil {
-					if confirmDelete() {
-						t.pending = 'd'
-					} else {
-						t.doDelete()
-					}
+					t.pending = 'd' // dd deletes; u undoes
 				}
+			case 'u':
+				t.popUndo()
 			case 'y':
 				t.pending = 'y'
 			case '/':
-				t.in = &lineInput{kind: '/'}
+				t.in = newLineInput('/', "")
 			case ':':
-				t.in = &lineInput{kind: ':'}
+				t.in = newLineInput(':', "")
 			case 'n':
 				t.findNext(1)
 			case 'N':

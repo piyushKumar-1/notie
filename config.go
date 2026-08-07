@@ -56,6 +56,12 @@ func configSet(key, val string) {
 // applyConfig loads config-driven runtime state (currently the UI accent).
 // Called once at startup, before any command runs. Read-only: never writes.
 func applyConfig() {
+	for _, s := range iconSets {
+		if s.name == configVal("ui.icons", "classic") {
+			applyIcons(s)
+			break
+		}
+	}
 	name := configVal("ui.accent", "blue")
 	for _, a := range accentPalette {
 		if a.name == name {

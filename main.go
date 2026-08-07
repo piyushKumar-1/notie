@@ -93,6 +93,7 @@ func appendLine(path, header, line string) {
 func usage() {
 	fmt.Print(`notie — local notes in ~/.notie
 
+  notie                   open the interactive dashboard (also: notie tui)
   notie add "text"        append to today's journal (~/.notie/<date>/journal.md)
   notie add <date> [HH:MM] "text"
                           add to an older day, in chronological position
@@ -132,6 +133,11 @@ func usage() {
             a add · e edit · ↵ details (tasks) · dd delete · / search
             n/N next/prev · t today
             q/:q quit · :ff <pat> find date files · :fg <pat> find mentions
+
+  Editing:  text fields and the detail editor are modal (vim-style): they open
+            ready to type; Esc → normal mode (hjkl move · i/a insert · o open
+            line · x delete · u undo) · Esc again or ^S saves · ^C discards.
+            Remap keys or turn modal editing off under notie settings.
 `)
 }
 
@@ -833,7 +839,13 @@ func main() {
 	applyConfig()
 	args := os.Args[1:]
 	if len(args) == 0 {
-		usage()
+		// In a terminal, land on the dashboard; otherwise print usage so pipes
+		// and scripts still get plain text.
+		if isTTY() {
+			runDashboard()
+		} else {
+			usage()
+		}
 		return
 	}
 	text := strings.Join(args[1:], " ")
@@ -924,6 +936,8 @@ func main() {
 		}
 	case "task":
 		cmdTask(args[1:])
+	case "tui", "menu", "dashboard", "home":
+		runDashboard()
 	case "settings", "config":
 		if isTTY() {
 			runSettingsTUI()

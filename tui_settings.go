@@ -47,6 +47,18 @@ func hhmmValid(v string) string {
 	return "use HH:MM (24-hour)"
 }
 
+// keyValid accepts exactly one printable ASCII character — a single keybinding.
+func keyValid(v string) string {
+	v = strings.TrimSpace(v)
+	if len([]rune(v)) != 1 {
+		return "use a single character"
+	}
+	if c := v[0]; c < 33 || c > 126 {
+		return "use a printable ASCII key"
+	}
+	return ""
+}
+
 func accentNames() []string {
 	out := make([]string, len(accentPalette))
 	for i, a := range accentPalette {
@@ -84,6 +96,12 @@ func settingsItems() []settingItem {
 			set: setAccent,
 		},
 		{
+			label: "Icon pack", hint: "the glyph set used across the TUI",
+			kind: 'c', opts: iconNames(),
+			get: func() string { return configVal("ui.icons", "classic") },
+			set: setIcons,
+		},
+		{
 			label: "Default task priority", hint: "0 high · 1 normal · 2 low",
 			kind: 'c', opts: []string{"0", "1", "2"},
 			get: defaultPri,
@@ -112,7 +130,7 @@ func settingsItems() []settingItem {
 			},
 		},
 		{
-			label: "Confirm before delete", hint: "require a second keystroke before dd deletes",
+			label: "Confirm before delete", hint: "ask for a y confirmation after dd (dd is always required)",
 			kind: 'a',
 			get:  func() string { return onOff(confirmDelete()) },
 			act: func(t *settingsTUI) {
@@ -170,6 +188,40 @@ func settingsItems() []settingItem {
 					t.status = cGrey + "disabled" + cReset
 				}
 			},
+		},
+		{
+			label: "Vim editing", hint: "modal input in every editor (Esc → normal mode)",
+			kind: 'a',
+			get:  func() string { return onOff(vimEnabled()) },
+			act: func(t *settingsTUI) {
+				b := !vimEnabled()
+				configSet("ui.vim_mode", onOff(b))
+				t.status = statusOnOff(b, "vim editing")
+			},
+		},
+		{
+			label: "  undo key", hint: "normal-mode key that undoes the last edit",
+			kind: 't', valid: keyValid,
+			get: func() string { return configVal("keys.undo", "u") },
+			set: func(v string) { configSet("keys.undo", strings.TrimSpace(v)) },
+		},
+		{
+			label: "  insert key", hint: "normal-mode key that starts typing",
+			kind: 't', valid: keyValid,
+			get: func() string { return configVal("keys.insert", "i") },
+			set: func(v string) { configSet("keys.insert", strings.TrimSpace(v)) },
+		},
+		{
+			label: "  append key", hint: "normal-mode key that types after the cursor",
+			kind: 't', valid: keyValid,
+			get: func() string { return configVal("keys.append", "a") },
+			set: func(v string) { configSet("keys.append", strings.TrimSpace(v)) },
+		},
+		{
+			label: "  open-line key", hint: "normal-mode key that opens a line below",
+			kind: 't', valid: keyValid,
+			get: func() string { return configVal("keys.open_line", "o") },
+			set: func(v string) { configSet("keys.open_line", strings.TrimSpace(v)) },
 		},
 		{label: "Notes directory", kind: 'i', get: notieDir},
 		{label: "zsh audit hook", kind: 'i', get: zshHookStatus},
@@ -244,7 +296,7 @@ func (t *settingsTUI) render() {
 	b.WriteString(fmt.Sprintf("\x1b[%d;1H", rows))
 	switch {
 	case t.in != nil:
-		b.WriteString(inputBar(cYellow+" "+iEdit+" "+cReset, t.in.buf))
+		b.WriteString(inputBar(cYellow+" "+iEdit+" "+cReset, t.in))
 	case t.status != "":
 		b.WriteString(" " + t.status)
 	default:
@@ -281,7 +333,7 @@ func (t *settingsTUI) activate() {
 	case 'c':
 		t.cycleOpt(1)
 	case 't':
-		t.in = &lineInput{kind: 'e', buf: it.get()}
+		t.in = newLineInput('e', it.get())
 	case 'a':
 		if it.act != nil {
 			it.act(t)
@@ -294,11 +346,11 @@ func runSettingsTUI() {
 	runScreen(cmdShowSettings, func(r *bufio.Reader) {
 		for {
 			t.render()
-			c, err := readKey(r)
-			if err != nil {
-				return
-			}
 			if t.in != nil {
+				c, err := readEditKey(r)
+				if err != nil {
+					return
+				}
 				switch t.in.key(c) {
 				case "cancel":
 					t.in = nil
@@ -316,6 +368,10 @@ func runSettingsTUI() {
 					t.status = cGreen + "saved" + cReset
 				}
 				continue
+			}
+			c, err := readKey(r)
+			if err != nil {
+				return
 			}
 			if t.pending == 'y' {
 				t.pending = 0

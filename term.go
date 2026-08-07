@@ -96,6 +96,7 @@ func readEditKey(r *bufio.Reader) (int, error) {
 	}
 	b1, _ := r.ReadByte()
 	if b1 != '[' && b1 != 'O' {
+		r.UnreadByte() // a lone Esc — don't swallow the next key (a normal-mode command)
 		return 27, nil
 	}
 	switch b2, _ := r.ReadByte(); b2 {
@@ -145,6 +146,7 @@ func readKey(r *bufio.Reader) (byte, error) {
 	}
 	b1, _ := r.ReadByte()
 	if b1 != '[' && b1 != 'O' {
+		r.UnreadByte() // a lone Esc — don't swallow the following key
 		return 27, nil
 	}
 	b2, _ := r.ReadByte()

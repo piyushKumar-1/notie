@@ -28,6 +28,47 @@ type taskTUI struct {
 	detailID  string // id of the task shown in the detail pane
 	detailSum string // that task's one-line summary (for the pane header)
 	detailOff int    // scroll offset within the detail pane
+
+	undo []taskUndo // session undo stack for destructive edits (u restores)
+}
+
+// taskUndo is one point on the list-level undo stack: the full task.md content
+// plus any task-detail files a mutation touched, so a delete (which also drops
+// the detail file) can be fully restored.
+type taskUndo struct {
+	lines   []string
+	details map[string]string // id -> detail content to rewrite
+	cursor  int
+}
+
+// pushUndo snapshots the current task.md and cursor (plus the given detail
+// files) onto the undo stack before a destructive change.
+func (t *taskTUI) pushUndo(details map[string]string) {
+	cp := append([]string(nil), t.lines...)
+	t.undo = append(t.undo, taskUndo{cp, details, t.cursor})
+	if len(t.undo) > 100 {
+		t.undo = t.undo[1:]
+	}
+}
+
+// popUndo restores the most recent snapshot, reviving deleted tasks (and their
+// descriptions) in place.
+func (t *taskTUI) popUndo() {
+	if len(t.undo) == 0 {
+		t.status = cGrey + "nothing to undo" + cReset
+		return
+	}
+	u := t.undo[len(t.undo)-1]
+	t.undo = t.undo[:len(t.undo)-1]
+	writeLines(taskPath(), u.lines)
+	for id, content := range u.details {
+		writeTaskDetail(id, content)
+	}
+	t.reload()
+	if len(t.tasks) > 0 {
+		t.cursor = min(u.cursor, len(t.tasks)-1)
+	}
+	t.status = cGreen + "undo" + cReset
 }
 
 // reload rebuilds the visible task list: grouped by priority (0·1·2, unmarked
@@ -172,16 +213,16 @@ func (t *taskTUI) render() {
 	b.WriteString(fmt.Sprintf("\x1b[%d;1H", rows))
 	switch {
 	case t.in != nil && t.in.kind == 'a':
-		b.WriteString(inputBar(cYellow+" + "+cReset, t.in.buf))
+		b.WriteString(inputBar(cYellow+" + "+cReset, t.in))
 		if t.in.buf == "" {
 			b.WriteString(cGrey + " text — prefix 0|1|2 to set priority (default " + defaultPri() + ")" + cReset)
 		}
 	case t.in != nil && t.in.kind == 'e':
-		b.WriteString(inputBar(cYellow+" "+iEdit+" "+cReset, t.in.buf))
+		b.WriteString(inputBar(cYellow+" "+iEdit+" "+cReset, t.in))
 	case t.in != nil && t.in.kind == '/':
-		b.WriteString(inputBar(cAccent+" /"+cReset, t.in.buf))
+		b.WriteString(inputBar(cAccent+" /"+cReset, t.in))
 	case t.in != nil && t.in.kind == ':':
-		b.WriteString(inputBar(cYellow+" :"+cReset, t.in.buf))
+		b.WriteString(inputBar(cYellow+" :"+cReset, t.in))
 	case t.pending == 'd':
 		b.WriteString(cRed + " d… delete? press d again" + cReset)
 	case t.status != "":
@@ -253,6 +294,7 @@ func (t *taskTUI) toggle() {
 	if len(t.tasks) == 0 {
 		return
 	}
+	t.pushUndo(nil)
 	i := t.tasks[t.cursor]
 	l := t.lines[i]
 	if strings.HasPrefix(l, "- [x]") {
@@ -273,12 +315,17 @@ func (t *taskTUI) delete() {
 		return
 	}
 	i := t.tasks[t.cursor]
+	details := map[string]string{}
 	if m := taskRe.FindStringSubmatch(t.lines[i]); m != nil {
-		removeTaskDetail(m[1])
+		details[m[1]] = readTaskDetail(m[1]) // remember it so undo can revive it
+	}
+	t.pushUndo(details)
+	for id := range details {
+		removeTaskDetail(id)
 	}
 	t.lines = append(t.lines[:i], t.lines[i+1:]...)
 	t.save()
-	t.status = cRed + "deleted" + cReset
+	t.status = cRed + "deleted · u to undo" + cReset
 }
 
 // addTask parses "[0|1|2] description" — a leading digit sets the priority,
@@ -295,6 +342,7 @@ func (t *taskTUI) addTask(in string) {
 	if desc == "" {
 		return
 	}
+	t.pushUndo(nil)
 	id := nextID()
 	appendLine(taskPath(), "Tasks", fmt.Sprintf("- [ ] #%d !%s %s (added %s)", id, pri, desc, today()))
 	t.reload()
@@ -317,6 +365,7 @@ func (t *taskTUI) setPri(p byte) {
 	if len(rest) > 2 && rest[0] == '!' && rest[1] >= '0' && rest[1] <= '2' && rest[2] == ' ' {
 		rest = rest[3:]
 	}
+	t.pushUndo(nil)
 	t.lines[i] = head + "!" + string(p) + " " + rest
 	id := taskRe.FindStringSubmatch(t.lines[i])[1]
 	t.save()
@@ -345,6 +394,7 @@ func (t *taskTUI) editDesc(text string) {
 	if m[6] != "" {
 		line += " (done " + m[6] + ")"
 	}
+	t.pushUndo(nil)
 	t.lines[t.tasks[t.cursor]] = line
 	t.save()
 	t.cursorTo(m[2])
@@ -383,12 +433,11 @@ func runTaskTUI() {
 	runScreen(printTasks, func(r *bufio.Reader) {
 		for {
 			t.render()
-			c, err := readKey(r)
-			if err != nil {
-				return
-			}
-
 			if t.in != nil {
+				c, err := readEditKey(r)
+				if err != nil {
+					return
+				}
 				switch t.in.key(c) {
 				case "cancel":
 					t.in = nil
@@ -417,6 +466,11 @@ func runTaskTUI() {
 					}
 				}
 				continue
+			}
+
+			c, err := readKey(r)
+			if err != nil {
+				return
 			}
 
 			// Detail pane: scroll, edit in $EDITOR, or back to the list.
@@ -450,8 +504,21 @@ func runTaskTUI() {
 			t.status = ""
 			if t.pending == 'd' {
 				t.pending = 0
-				if c == 'd' {
+				if c == 'd' { // dd — delete, or ask to confirm first
+					if confirmDelete() {
+						t.pending, t.status = 'D', cYellow+"press y to delete · any key cancels"+cReset
+					} else {
+						t.delete()
+					}
+				}
+				continue
+			}
+			if t.pending == 'D' { // confirming a delete
+				t.pending = 0
+				if c == 'y' {
 					t.delete()
+				} else {
+					t.status = cGrey + "cancelled" + cReset
 				}
 				continue
 			}
@@ -502,28 +569,26 @@ func runTaskTUI() {
 					t.status = cGrey + "hiding done" + cReset
 				}
 			case 'd':
-				if confirmDelete() {
-					t.pending = 'd'
-				} else {
-					t.delete()
-				}
+				t.pending = 'd' // dd deletes (a second d); u undoes
+			case 'u':
+				t.popUndo()
 			case 'y':
 				t.pending = 'y'
 			case 'e':
 				if len(t.tasks) > 0 {
 					m := taskFullRe.FindStringSubmatch(t.lines[t.tasks[t.cursor]])
 					if m != nil {
-						t.in = &lineInput{kind: 'e', buf: m[4]}
+						t.in = newLineInput('e', m[4])
 					}
 				}
 			case 13, 10: // Enter — open the task's details
 				t.openDetail()
 			case 'a', 'o':
-				t.in = &lineInput{kind: 'a'}
+				t.in = newLineInput('a', "")
 			case '/':
-				t.in = &lineInput{kind: '/'}
+				t.in = newLineInput('/', "")
 			case ':':
-				t.in = &lineInput{kind: ':'}
+				t.in = newLineInput(':', "")
 			case 'n':
 				t.findNext(1)
 			case 'N':
