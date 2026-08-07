@@ -125,7 +125,7 @@ func usage() {
   notie show [what]       print a file (journal|shell|remember|important|task|datecache|YYYY-MM-DD)
   notie show shell [date] print a day's shell audit trail (default today)
   notie upgrade           clone the public repo, rebuild, and replace this binary
-                          (--check reports what's available, installs nothing)
+                          (also: notie update · --check reports without installing)
   notie version           print the commit this binary was built from
 
   TUI keys: ↑/↓ (j/k) move · ←/→ (h/l) switch pane in the day browsers
@@ -967,7 +967,7 @@ func main() {
 			return
 		}
 		cmdShow(what)
-	case "upgrade":
+	case "upgrade", "update":
 		cmdUpgrade(args[1:])
 	case "version", "--version":
 		cmdVersion()
